@@ -187,3 +187,4 @@ demo_out/
 demo_local/
 examples/output/
 local_err.log
+/ui/node_modules

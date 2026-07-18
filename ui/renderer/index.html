@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>smartcode</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ============ header ============ -->
+    <header id="header">
+      <div class="brand">
+        <div class="brand-mark">&lt;/&gt;</div>
+        <div>
+          <div class="brand-name">smartcode</div>
+          <div class="brand-sub">code-generation agent · LangGraph</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div id="run-clock" class="run-clock" hidden>0.0s</div>
+        <div id="bridge-status" class="bridge-status">
+          <span class="dot"></span><span class="txt">starting…</span>
+        </div>
+        <button id="btn-restart" class="ghost-btn" title="Restart the Python agent process">Restart agent</button>
+      </div>
+    </header>
+
+    <!-- ============ left panel: parameters ============ -->
+    <aside id="panel">
+      <div class="mode-tabs" id="mode-tabs">
+        <button data-mode="generate" class="active">Generate</button>
+        <button data-mode="modify">Modify</button>
+        <button data-mode="review">Review</button>
+      </div>
+
+      <label class="field">
+        <span class="field-label" id="objective-label">What should be built?</span>
+        <textarea id="objective" rows="4"
+          placeholder="e.g. FastAPI endpoint POST /users with a pydantic model"></textarea>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Provider</span>
+        <div class="select-wrap">
+          <select id="provider"></select>
+        </div>
+        <span class="field-hint" id="provider-hint"></span>
+      </label>
+
+      <div class="field-row">
+        <label class="field half">
+          <span class="field-label">Language</span>
+          <div class="select-wrap"><select id="language"><option value="">auto</option></select></div>
+        </label>
+        <label class="field half">
+          <span class="field-label">Framework</span>
+          <div class="select-wrap"><select id="framework"><option value="">none</option></select></div>
+        </label>
+      </div>
+
+      <div id="out-path-field" class="field">
+        <span class="field-label">Output file</span>
+        <div class="path-row">
+          <input id="out-path" type="text" placeholder="generated/solution.py" />
+          <button id="btn-pick-out" class="ghost-btn">…</button>
+        </div>
+      </div>
+
+      <div id="targets-field" class="field" hidden>
+        <span class="field-label">Target files</span>
+        <div id="targets-list" class="chip-list"></div>
+        <button id="btn-add-targets" class="ghost-btn wide">+ Add files</button>
+      </div>
+
+      <div class="field">
+        <span class="field-label">Acceptance criteria</span>
+        <div id="acceptance-list" class="chip-list"></div>
+        <div class="path-row">
+          <input id="acceptance-input" type="text" placeholder="add a criterion, press Enter" />
+        </div>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <div class="field-row">
+          <label class="field half">
+            <span class="field-label">Risk tier</span>
+            <div class="select-wrap">
+              <select id="risk">
+                <option value="low">low — auto-apply</option>
+                <option value="medium" selected>medium — confirm</option>
+                <option value="high">high — explicit</option>
+              </select>
+            </div>
+          </label>
+          <label class="field half">
+            <span class="field-label">Max revisions</span>
+            <input id="max-revisions" type="number" min="0" max="10" value="3" />
+          </label>
+        </div>
+        <label class="field">
+          <span class="field-label">Test command (optional)</span>
+          <input id="test-command" type="text" placeholder="pytest -q" />
+        </label>
+        <div class="field-row toggles">
+          <label class="toggle"><input id="run-linters" type="checkbox" checked /><span>Linters</span></label>
+          <label class="toggle"><input id="run-tests" type="checkbox" checked /><span>Tests</span></label>
+        </div>
+      </details>
+
+      <button id="btn-run" class="run-btn" disabled>
+        <span class="run-label">Run pipeline</span>
+      </button>
+      <div id="form-error" class="form-error" hidden></div>
+    </aside>
+
+    <!-- ============ main: flow + activity ============ -->
+    <main id="main">
+      <section id="flow-card">
+        <div class="card-head">
+          <h2>Pipeline</h2>
+          <div id="flow-legend" class="legend">
+            <span class="lg lg-idle">○ pending</span>
+            <span class="lg lg-active">● running</span>
+            <span class="lg lg-done">✓ done</span>
+            <span class="lg lg-fail">✕ failed</span>
+            <span class="lg lg-skip">– skipped</span>
+          </div>
+        </div>
+        <div id="flow-wrap"><!-- SVG injected --></div>
+      </section>
+
+      <section id="bottom">
+        <div id="timeline-card">
+          <div class="card-head"><h2>Event ledger</h2><span id="event-count" class="count"></span></div>
+          <ol id="timeline"></ol>
+        </div>
+        <div id="detail-card">
+          <div class="tabs" id="detail-tabs">
+            <button data-tab="detail" class="active">Node detail</button>
+            <button data-tab="result">Result</button>
+          </div>
+          <div id="tab-detail" class="tab-body">
+            <div class="placeholder">Run the pipeline, then select an event to inspect the node's output.</div>
+          </div>
+          <div id="tab-result" class="tab-body" hidden>
+            <div class="placeholder">No result yet.</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- ============ HITL approval modal ============ -->
+    <div id="modal-backdrop" hidden>
+      <div id="approval-modal" role="dialog" aria-modal="true">
+        <h2>⚠ Write approval required</h2>
+        <p class="modal-sub">The agent wants to write these edits to disk
+          (<span id="modal-risk"></span> risk tier). Nothing is written until you approve.</p>
+        <div id="modal-edits"></div>
+        <div class="modal-actions">
+          <button id="btn-reject" class="ghost-btn danger">Reject</button>
+          <button id="btn-approve" class="run-btn slim">Approve &amp; write</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

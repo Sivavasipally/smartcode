@@ -185,7 +185,9 @@ class GraphNodes:
 
         plan.steps = plan.steps[: self.settings.max_plan_steps]
         ev = self.logger.emit("planner", f"{len(plan.steps)} step(s): {plan.approach[:120]}",
-                              steps=[s.description for s in plan.steps])
+                              approach=plan.approach,
+                              steps=[s.description for s in plan.steps],
+                              open_questions=plan.open_questions)
         return {"plan": plan.model_dump(), "events": [ev]}
 
     def coder(self, state: State) -> State:
@@ -298,9 +300,16 @@ class GraphNodes:
                 result.overall_ok = False
                 result.summary = f"test failures: {tests_detail[:800]}"
 
-        ev = self.logger.emit("verifier",
-                              "PASS" if result.overall_ok else f"FAIL: {result.summary[:200]}",
-                              checks=[c.name for c in result.checks if not c.passed])
+        ev = self.logger.emit(
+            "verifier",
+            "PASS" if result.overall_ok else f"FAIL: {result.summary[:200]}",
+            ok=result.overall_ok,
+            summary=result.summary,
+            lint_ok=result.lint_ok,
+            tests_ok=result.tests_ok,
+            checks=[{"name": c.name, "passed": c.passed, "detail": c.detail}
+                    for c in result.checks],
+        )
         return {"verify": result.model_dump(), "files": files, "events": [ev]}
 
     def critic(self, state: State) -> State:
@@ -339,6 +348,11 @@ class GraphNodes:
             "critic",
             f"score={critique.score:.2f} revise={critique.revise} "
             f"findings={len(critique.findings)}",
+            score=critique.score,
+            revise=critique.revise,
+            satisfies=critique.satisfies_acceptance,
+            rationale=critique.rationale,
+            findings=[f.model_dump() for f in critique.findings],
         )
         return {"critique": critique.model_dump(), "events": [ev]}
 
@@ -438,6 +452,10 @@ class GraphNodes:
         except OSError:
             pass
 
-        ev = self.logger.emit("finalize", f"status={status} "
-                              f"written={sum(1 for a in applied if a.applied)}")
+        ev = self.logger.emit(
+            "finalize",
+            f"status={status} written={sum(1 for a in applied if a.applied)}",
+            status=status,
+            applied=[a.model_dump() for a in applied],
+        )
         return {"evidence": package.model_dump(mode="json"), "events": [ev]}
