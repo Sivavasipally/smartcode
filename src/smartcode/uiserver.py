@@ -87,10 +87,12 @@ def _handle_run(msg: dict) -> None:
         send({"type": "event", "runId": run_id, "event": event})
 
     def approval_cb(task: TaskContract, edits: list[dict], files: dict) -> bool:
+        from .editing import unified_diffs
         gate = _Approval()
         _approvals[run_id] = gate
         send({"type": "approval_request", "runId": run_id,
-              "risk": task.risk_tier.value, "edits": edits})
+              "risk": task.risk_tier.value, "edits": edits,
+              "diffs": unified_diffs(files)})
         gate.ready.wait(timeout=_APPROVAL_TIMEOUT_S)
         _approvals.pop(run_id, None)
         return gate.approved
@@ -150,6 +152,42 @@ def _handle_run(msg: dict) -> None:
         send({"type": "error", "runId": run_id, "message": str(e)})
 
 
+def _handle_history(msg: dict) -> None:
+    """Summaries of recent evidence packages for the History tab."""
+    settings = load_settings()
+    run_dir = settings.data_dir / "runs"
+    items = []
+    for f in sorted(run_dir.glob("evidence-*.json"), reverse=True)[:25]:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        items.append({
+            "file": f.name,
+            "when": f.stem.replace("evidence-", ""),
+            "status": data.get("status"),
+            "intent": (data.get("task") or {}).get("intent"),
+            "objective": ((data.get("task") or {}).get("objective") or "")[:120],
+            "revisions": data.get("revisions", 0),
+        })
+    send({"type": "history", "id": msg.get("id"), "runs": items})
+
+
+def _handle_load_run(msg: dict) -> None:
+    """Full evidence package for one past run (History tab drill-down)."""
+    settings = load_settings()
+    name = Path(str(msg.get("file", ""))).name   # no traversal
+    path = settings.data_dir / "runs" / name
+    if not (name.startswith("evidence-") and path.is_file()):
+        send({"type": "error", "id": msg.get("id"), "message": f"unknown run {name!r}"})
+        return
+    try:
+        send({"type": "run_loaded", "id": msg.get("id"),
+              "evidence": json.loads(path.read_text(encoding="utf-8"))})
+    except (OSError, ValueError) as e:
+        send({"type": "error", "id": msg.get("id"), "message": str(e)})
+
+
 def _handle_approval_response(msg: dict) -> None:
     gate = _approvals.get(str(msg.get("id")))
     if gate:
@@ -180,6 +218,10 @@ def main() -> None:
             workers.append(t)
         elif cmd == "approval_response":
             _handle_approval_response(msg)
+        elif cmd == "history":
+            threading.Thread(target=_handle_history, args=(msg,), daemon=True).start()
+        elif cmd == "load_run":
+            threading.Thread(target=_handle_load_run, args=(msg,), daemon=True).start()
         elif cmd == "shutdown":
             break
         else:

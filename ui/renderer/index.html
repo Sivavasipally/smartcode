@@ -111,7 +111,8 @@
         </div>
       </details>
 
-      <button id="btn-run" class="run-btn" disabled>
+      <button id="btn-run" class="run-btn" disabled
+              title="Ctrl+Enter also starts the run">
         <span class="run-label">Run pipeline</span>
       </button>
       <div id="form-error" class="form-error" hidden></div>
@@ -142,12 +143,16 @@
           <div class="tabs" id="detail-tabs">
             <button data-tab="detail" class="active">Node detail</button>
             <button data-tab="result">Result</button>
+            <button data-tab="history">History</button>
           </div>
           <div id="tab-detail" class="tab-body">
             <div class="placeholder">Run the pipeline, then select an event to inspect the node's output.</div>
           </div>
           <div id="tab-result" class="tab-body" hidden>
             <div class="placeholder">No result yet.</div>
+          </div>
+          <div id="tab-history" class="tab-body" hidden>
+            <div class="placeholder">Loading run history…</div>
           </div>
         </div>
       </section>

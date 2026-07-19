@@ -74,6 +74,11 @@ Edit contract:
 - Paths must be inside the writable paths from the task contract.
 - Emit complete, runnable code — all imports, no placeholders, no "...".
 - Prefer the smallest set of edits that satisfies the acceptance criteria.
+
+Example of a well-formed answer (shape only — write real code for THIS task):
+{"edits": [{"action": "replace", "path": "src/svc.py", "anchor": "get_user",
+"content": "def get_user(uid: int) -> User:\\n    ...complete body...\\n",
+"summary": "validate uid before lookup"}], "notes": "single anchored change"}
 {% if feedback %}
 
 Previous attempt failed verification/review. Fix these issues:

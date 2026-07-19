@@ -37,7 +37,22 @@ def _on_event(event: dict) -> None:
                   f"[{style}]{node:<15}[/{style}] {event.get('message', '')}")
 
 
+def _print_diff(diff: str, max_lines: int = 80) -> None:
+    for line in diff.splitlines()[:max_lines]:
+        if line.startswith("+") and not line.startswith("+++"):
+            console.print(f"[green]{line}[/green]", highlight=False)
+        elif line.startswith("-") and not line.startswith("---"):
+            console.print(f"[red]{line}[/red]", highlight=False)
+        elif line.startswith("@@"):
+            console.print(f"[cyan]{line}[/cyan]", highlight=False)
+        else:
+            console.print(f"[dim]{line}[/dim]", highlight=False)
+    if len(diff.splitlines()) > max_lines:
+        console.print(f"[dim]… {len(diff.splitlines()) - max_lines} more diff lines[/dim]")
+
+
 def _approval(task: TaskContract, edits: list[dict], files: dict) -> bool:
+    from .editing import unified_diffs
     console.print()
     table = Table(title="Pending writes (HITL gate)", show_lines=False)
     table.add_column("action")
@@ -47,6 +62,10 @@ def _approval(task: TaskContract, edits: list[dict], files: dict) -> bool:
         table.add_row(e.get("action", "?"), e.get("path", "?"),
                       (e.get("summary") or "")[:60])
     console.print(table)
+    for path, diff in unified_diffs(files).items():
+        if diff.strip():
+            console.print(f"\n[bold]{path}[/bold]")
+            _print_diff(diff, max_lines=40)
     return Confirm.ask(f"Apply these edits (risk tier: {task.risk_tier.value})?",
                        default=True)
 
@@ -103,6 +122,11 @@ def _show_result(ev: EvidencePackage) -> None:
         lines.append(f"\n[red]{ev.task.notes.strip()}[/red]")
 
     console.print(Panel("\n".join(lines), title="smartcode result", expand=False))
+
+    for path, diff in (ev.diffs or {}).items():
+        if diff.strip():
+            console.print(f"[bold]diff: {path}[/bold]")
+            _print_diff(diff)
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +225,43 @@ def providers():
         mark = "[green]available[/green]" if ok else "[red]unavailable[/red]"
         active = " [bold](active)[/bold]" if pid == settings.provider else ""
         table.add_row(pid + active, mark, reason, str(model))
+    console.print(table)
+
+
+@app.command()
+def runs(limit: int = typer.Option(10, "--limit", "-n", help="how many to show")):
+    """List recent runs from the evidence ledger (.smartcode/runs)."""
+    import json as _json
+
+    settings = load_settings()
+    run_dir = settings.data_dir / "runs"
+    files = sorted(run_dir.glob("evidence-*.json"), reverse=True)[:limit]
+    if not files:
+        console.print(f"[dim]no runs recorded under {run_dir}[/dim]")
+        raise typer.Exit(0)
+
+    table = Table(title=f"Recent runs ({run_dir})")
+    table.add_column("when")
+    table.add_column("status")
+    table.add_column("intent")
+    table.add_column("rev")
+    table.add_column("objective")
+    for f in files:
+        try:
+            data = _json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        status = data.get("status", "?")
+        style = {"success": "green", "best_effort": "yellow",
+                 "rejected": "red", "review_only": "cyan"}.get(status, "white")
+        task = data.get("task", {})
+        table.add_row(
+            f.stem.replace("evidence-", ""),
+            f"[{style}]{status}[/{style}]",
+            task.get("intent", "?"),
+            str(data.get("revisions", 0)),
+            (task.get("objective") or "")[:70],
+        )
     console.print(table)
 
 

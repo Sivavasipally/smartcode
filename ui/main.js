@@ -1,5 +1,5 @@
 /* Electron main process: window + Python agent sidecar over stdio JSON lines. */
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const readline = require('readline');
@@ -63,6 +63,12 @@ ipcMain.handle('bridge-send', (_e, obj) => {
 });
 
 ipcMain.handle('bridge-restart', () => { startBridge(); return true; });
+
+ipcMain.handle('reveal-path', (_e, p) => {
+  const abs = path.isAbsolute(p) ? p : path.join(REPO_ROOT, p);
+  shell.showItemInFolder(abs);
+  return true;
+});
 
 ipcMain.handle('pick-files', async () => {
   const res = await dialog.showOpenDialog(win, {

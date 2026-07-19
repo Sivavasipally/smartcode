@@ -105,3 +105,19 @@ def test_extract_code_fence():
     assert extract_code_fence(bare) == "def g():\n    return 3\n"
 
     assert extract_code_fence("Sorry, I cannot help with that.") is None
+
+
+# --- unified diffs ---------------------------------------------------------
+def test_unified_diffs(tmp_path):
+    from smartcode.editing import unified_diffs
+
+    existing = tmp_path / "old.py"
+    existing.write_text("def f():\n    return 1\n", encoding="utf-8")
+    files = {
+        str(existing): "def f():\n    return 2\n",
+        str(tmp_path / "new.py"): "x = 1\n",
+    }
+    diffs = unified_diffs(files)
+    assert "-    return 1" in diffs[str(existing)]
+    assert "+    return 2" in diffs[str(existing)]
+    assert "+x = 1" in diffs[str(tmp_path / "new.py")]

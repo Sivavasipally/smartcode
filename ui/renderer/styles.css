@@ -262,6 +262,38 @@ pre.code {
 }
 .raw-toggle { font-size: 11px; color: var(--text-3); cursor: pointer; text-decoration: underline; }
 
+/* diff view */
+pre.diff {
+  background: #131312; border: 1px solid var(--border-strong); border-radius: 8px;
+  padding: 10px 12px; overflow: auto; font: 12px/1.5 var(--mono);
+  max-height: 320px; white-space: pre;
+}
+.dl-add { color: #7cd992; }
+.dl-del { color: #f08a8f; }
+.dl-hunk { color: var(--accent); }
+.dl-ctx { color: var(--text-3); }
+details.diff-file { margin-bottom: 8px; }
+details.diff-file summary {
+  cursor: pointer; font: 600 12px var(--mono); color: var(--text-2);
+  padding: 4px 0;
+}
+
+/* history tab */
+.hist-row {
+  display: grid; grid-template-columns: 148px 86px 60px 1fr; gap: 10px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  font-size: 12.5px; align-items: baseline;
+}
+.hist-row:hover { background: var(--surface-2); }
+.hist-when { font: 11px var(--mono); color: var(--text-3); }
+.hist-status { font: 700 10px var(--mono); text-transform: uppercase; }
+.hist-status.success { color: var(--good); }
+.hist-status.best_effort { color: var(--warning); }
+.hist-status.rejected { color: var(--critical); }
+.hist-status.review_only { color: var(--accent); }
+.hist-intent { color: var(--text-3); }
+.hist-obj { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* result tab */
 .status-banner {
   display: flex; align-items: center; gap: 10px;

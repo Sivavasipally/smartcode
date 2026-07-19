@@ -5,5 +5,6 @@ contextBridge.exposeInMainWorld('smartcode', {
   restart: () => ipcRenderer.invoke('bridge-restart'),
   pickFiles: () => ipcRenderer.invoke('pick-files'),
   pickSave: (suggested) => ipcRenderer.invoke('pick-save', suggested),
+  reveal: (path) => ipcRenderer.invoke('reveal-path', path),
   onMessage: (cb) => ipcRenderer.on('bridge-message', (_e, msg) => cb(msg)),
 });

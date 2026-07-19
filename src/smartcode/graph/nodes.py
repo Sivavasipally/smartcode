@@ -18,7 +18,7 @@ from ..config import LANG_BY_EXT, Settings
 from ..context.authority import build_system_prompt
 from ..context.compaction import compact_scratchpad
 from ..context.contract import contract_for
-from ..editing import EditError, materialize, write_files
+from ..editing import EditError, materialize, unified_diffs, write_files
 from ..models import (
     Critique,
     EditSet,
@@ -152,7 +152,14 @@ class GraphNodes:
             ev = self.logger.emit("retriever", f"insufficient context: {detail}")
             return {"error": f"insufficient context: {detail}", "events": [ev]}
 
-        root = Path.cwd()
+        # Root the repo map at the targets' common parent so absolute targets
+        # outside the cwd still get a useful neighbourhood map.
+        import os
+        existing = [t for t in targets if t.exists()]
+        if existing:
+            root = Path(os.path.commonpath([str(t.resolve().parent) for t in existing]))
+        else:
+            root = Path.cwd()
         repo_map = build_repo_map(root if root.is_dir() else targets[0], focus=targets)
 
         ev = self.logger.emit(
@@ -258,8 +265,9 @@ class GraphNodes:
             + "Reply with ONLY one fenced code block containing the entire file — "
               "no explanation before or after."
         )
-        reply = self.llm.invoke([SystemMessage(content=system),
-                                 HumanMessage(content=prompt)])
+        from ..providers.base import invoke_with_retry
+        reply = invoke_with_retry(self.llm, [SystemMessage(content=system),
+                                             HumanMessage(content=prompt)])
         text = reply.content if isinstance(reply.content, str) else str(reply.content)
         code = extract_code_fence(text)
         if not code:
@@ -282,8 +290,10 @@ class GraphNodes:
             result = VerifyResult(parsed_ok=False, overall_ok=False,
                                   summary=f"edit application failed: {e}")
             ev = self.logger.emit("verifier", result.summary)
-            return {"verify": result.model_dump(), "files": {}, "events": [ev]}
+            return {"verify": result.model_dump(), "files": {}, "diffs": {},
+                    "events": [ev]}
 
+        diffs = unified_diffs(files)
         result = check_files(files)
 
         if result.overall_ok and self.settings.run_linters:
@@ -310,7 +320,8 @@ class GraphNodes:
             checks=[{"name": c.name, "passed": c.passed, "detail": c.detail}
                     for c in result.checks],
         )
-        return {"verify": result.model_dump(), "files": files, "events": [ev]}
+        return {"verify": result.model_dump(), "files": files, "diffs": diffs,
+                "events": [ev]}
 
     def critic(self, state: State) -> State:
         """Inferential reviewer / LLM-as-judge."""
@@ -322,7 +333,15 @@ class GraphNodes:
             retrieved = [Evidence.model_validate(e) for e in state.get("retrieved", [])]
             subject = render_evidence(retrieved)
         else:
-            subject = json.dumps(state.get("edits", []), indent=1)[:12000]
+            # Judge the *materialized result*, not the edit JSON: the whole
+            # file is what users get, and edits alone hide integration errors.
+            files = state.get("files") or {}
+            if files:
+                parts = [f"### {p}\n```\n{text[:6000]}\n```"
+                         for p, text in files.items()]
+                subject = "\n\n".join(parts)[:16000]
+            else:
+                subject = json.dumps(state.get("edits", []), indent=1)[:12000]
 
         system = build_system_prompt(task, skill=state.get("skill", ""),
                                      scratchpad=self._pad(state))
@@ -396,11 +415,9 @@ class GraphNodes:
             ok = self.approval_callback(task, state.get("edits", []),
                                         state.get("files", {}))
             decision = "approved" if ok else "rejected"
-        elif not self.settings.enable_hitl:
-            # No human in the loop by explicit configuration: medium may pass,
-            # high never auto-passes.
-            decision = "approved" if tier == "medium" else "rejected"
         else:
+            # No approver available (HITL disabled or headless): medium may
+            # pass, high never auto-passes.
             decision = "approved" if tier == "medium" else "rejected"
 
         ev = self.logger.emit("hitl_gate", f"tier={tier} -> {decision}")
@@ -435,6 +452,7 @@ class GraphNodes:
 
         package = EvidencePackage(
             task=task, plan=plan, edits=edits, applied=applied,
+            diffs=state.get("diffs", {}) or {},
             verify=verify, critique=critique,
             revisions=state.get("revise_count", 0), status=status,
         )

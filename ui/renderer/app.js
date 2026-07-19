@@ -295,6 +295,39 @@ function renderDetail(ev) {
   root.appendChild(raw); root.appendChild(pre);
 }
 
+/* ============================ diff rendering ============================ */
+function renderDiff(diffText) {
+  const pre = el('pre', 'diff');
+  for (const line of diffText.split('\n')) {
+    let cls = 'dl-ctx';
+    if (line.startsWith('+') && !line.startsWith('+++')) cls = 'dl-add';
+    else if (line.startsWith('-') && !line.startsWith('---')) cls = 'dl-del';
+    else if (line.startsWith('@@')) cls = 'dl-hunk';
+    const span = el('span', cls, line + '\n');
+    pre.appendChild(span);
+  }
+  return pre;
+}
+
+function diffSection(diffs, { open = false } = {}) {
+  const s = section('Changes (diff)');
+  let any = false;
+  for (const [path, diff] of Object.entries(diffs || {})) {
+    if (!diff.trim()) continue;
+    any = true;
+    const d = el('details', 'diff-file');
+    if (open) d.open = true;
+    const adds = (diff.match(/^\+(?!\+\+)/gm) || []).length;
+    const dels = (diff.match(/^-(?!--)/gm) || []).length;
+    const sum = el('summary', null, `${path.split(/[\\/]/).pop()}  (+${adds} / −${dels})`);
+    sum.title = path;
+    d.appendChild(sum);
+    d.appendChild(renderDiff(diff));
+    s.appendChild(d);
+  }
+  return any ? s : null;
+}
+
 /* ============================ result view ============================ */
 const STATUS_META = {
   success:     { ic: '✓', label: 'Success — verified, approved, written' },
@@ -325,6 +358,9 @@ function renderResult(evidence, writtenFiles) {
     root.appendChild(s);
   }
 
+  const ds = diffSection(evidence.diffs, { open: Object.keys(evidence.diffs || {}).length === 1 });
+  if (ds) root.appendChild(ds);
+
   const files = Object.entries(writtenFiles || {});
   if (files.length) {
     const s = section('Written files');
@@ -340,9 +376,18 @@ function renderResult(evidence, writtenFiles) {
       b.addEventListener('click', () => show(i));
       tabs.appendChild(b);
     });
-    s.appendChild(tabs); s.appendChild(pre); root.appendChild(s);
+    s.appendChild(tabs); s.appendChild(pre);
+    if (!bridge.demo) {
+      const reveal = el('button', 'ghost-btn', 'Show in folder');
+      reveal.addEventListener('click', () => {
+        const active = [...tabs.querySelectorAll('button')].findIndex((b) => b.classList.contains('active'));
+        bridge.reveal(files[Math.max(active, 0)][0]);
+      });
+      const row = el('div', 'dl-row'); row.appendChild(reveal); s.appendChild(row);
+    }
+    root.appendChild(s);
     show(0);
-  } else if (evidence.status !== 'review_only') {
+  } else if (evidence.status !== 'review_only' && !ds) {
     root.appendChild(el('div', 'placeholder', 'No files were written.'));
   }
 
@@ -364,6 +409,30 @@ function showTab(name) {
     b.classList.toggle('active', b.dataset.tab === name));
   $('#tab-detail').hidden = name !== 'detail';
   $('#tab-result').hidden = name !== 'result';
+  $('#tab-history').hidden = name !== 'history';
+  if (name === 'history') bridge.send({ id: 'hist', cmd: 'history' });
+}
+
+/* ============================ history tab ============================ */
+function renderHistory(runs) {
+  const root = $('#tab-history');
+  root.replaceChildren();
+  if (!runs.length) {
+    root.appendChild(el('div', 'placeholder', 'No recorded runs yet.'));
+    return;
+  }
+  runs.forEach((r) => {
+    const row = el('div', 'hist-row');
+    row.appendChild(el('span', 'hist-when', r.when));
+    row.appendChild(el('span', `hist-status ${r.status}`, r.status));
+    row.appendChild(el('span', 'hist-intent', r.intent));
+    const obj = el('span', 'hist-obj', r.objective);
+    obj.title = r.objective;
+    row.appendChild(obj);
+    row.title = `${r.revisions} revision(s) — click to open`;
+    row.addEventListener('click', () => bridge.send({ id: 'load', cmd: 'load_run', file: r.file }));
+    root.appendChild(row);
+  });
 }
 
 /* ============================ bridge ============================ */
@@ -417,7 +486,8 @@ function makeDemoBridge() {
           setTimeout(() => onMsg({ type: 'event', runId, event: e }), t);
         });
         setTimeout(() => onMsg({ type: 'approval_request', runId, risk: 'medium',
-          edits: [{ action: 'replace', path: 'src/api.py', anchor: 'create_user', summary: 'validated create_user with UserIn model' }] }), t + 600);
+          edits: [{ action: 'replace', path: 'src/api.py', anchor: 'create_user', summary: 'validated create_user with UserIn model' }],
+          diffs: { 'src/api.py': '--- a/api.py\n+++ b/api.py\n@@ -1,6 +1,10 @@\n from fastapi import APIRouter\n+from pydantic import BaseModel, EmailStr\n \n router = APIRouter()\n \n+class UserIn(BaseModel):\n+    name: str\n+    email: EmailStr\n+\n-@router.post("/users")\n-def create_user(user):\n+@router.post("/users", status_code=201)\n+def create_user(user: UserIn):\n     return user\n' } }), t + 600);
         makeDemoBridge._finish = (approved) => {
           let t2 = 0;
           const seq = approved ? finish : [
@@ -427,14 +497,30 @@ function makeDemoBridge() {
           seq.forEach((e) => { t2 += 450; setTimeout(() => onMsg({ type: 'event', runId, event: e }), t2); });
           setTimeout(() => onMsg({ type: 'result', runId,
             evidence: { status: approved ? 'success' : 'rejected', revisions: 1,
+              diffs: approved ? { 'src/api.py': '--- a/api.py\n+++ b/api.py\n@@ -1,6 +1,10 @@\n from fastapi import APIRouter\n+from pydantic import BaseModel, EmailStr\n \n router = APIRouter()\n \n+class UserIn(BaseModel):\n+    name: str\n+    email: EmailStr\n+\n-def create_user(user):\n+def create_user(user: UserIn):\n     return user\n' } : {},
               critique: { findings: [{ severity: 'nit', message: 'Consider a 409 for duplicate emails', location: 'src/api.py', suggestion: 'raise HTTPException(409)' }] } },
             written_files: approved ? { 'src/api.py': 'from fastapi import APIRouter, HTTPException\nfrom pydantic import BaseModel, EmailStr\n\nrouter = APIRouter()\n\nclass UserIn(BaseModel):\n    name: str\n    email: EmailStr\n\n@router.post("/users", status_code=201)\ndef create_user(user: UserIn):\n    return user\n' } : {},
           }), t2 + 500);
         };
       }
       if (obj.cmd === 'approval_response') makeDemoBridge._finish?.(obj.approved);
+      if (obj.cmd === 'history') {
+        setTimeout(() => onMsg({ type: 'history', runs: [
+          { file: 'evidence-demo-1.json', when: '2026-07-19T10-02-11', status: 'success', intent: 'modify', objective: 'add validation to create_user', revisions: 1 },
+          { file: 'evidence-demo-2.json', when: '2026-07-18T16-11-01', status: 'best_effort', intent: 'new', objective: 'is_palindrome(s) ignoring case and punctuation', revisions: 0 },
+          { file: 'evidence-demo-3.json', when: '2026-07-18T15-40-22', status: 'rejected', intent: 'modify', objective: 'rotate refresh tokens on every use', revisions: 3 },
+        ] }), 150);
+      }
+      if (obj.cmd === 'load_run') {
+        setTimeout(() => onMsg({ type: 'run_loaded', evidence: {
+          status: 'success', revisions: 1,
+          diffs: { 'src/api.py': '--- a/api.py\n+++ b/api.py\n@@ -1,3 +1,4 @@\n+from pydantic import EmailStr\n def create_user(user):\n     return user\n' },
+          critique: { findings: [] },
+        } }), 150);
+      }
       return true;
     },
+    reveal: async () => {},
   };
 }
 
@@ -546,6 +632,11 @@ bridge.onMessage((msg) => {
       showTab('result');
       break;
     }
+    case 'history': renderHistory(msg.runs || []); break;
+    case 'run_loaded':
+      renderResult(msg.evidence, {});
+      showTab('result');
+      break;
     case 'bridge_exit':
       setBridgeStatus('err', `agent exited (${msg.code})`);
       if (S.running) endRun();
@@ -593,6 +684,19 @@ function applyInit(msg) {
   if (msg.defaults?.risk) $('#risk').value = msg.defaults.risk;
   if (msg.defaults?.max_revisions) $('#max-revisions').value = msg.defaults.max_revisions;
 
+  // Re-apply persisted select values now that the options exist.
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem('smartcode-form') || 'null'); } catch (_) {}
+  if (saved) {
+    for (const id of ['provider', 'language', 'framework', 'risk']) {
+      const elx = document.getElementById(id);
+      if (saved[id] && [...elx.options].some((o) => o.value === saved[id] && !o.disabled)) {
+        elx.value = saved[id];
+      }
+    }
+    updateProviderHint();
+  }
+
   $('#btn-run').disabled = false;
 }
 
@@ -613,6 +717,8 @@ function openApprovalModal(msg) {
     if (e.summary) row.appendChild(el('span', 'edit-sum', e.summary));
     box.appendChild(row);
   });
+  const ds = diffSection(msg.diffs, { open: Object.keys(msg.diffs || {}).length === 1 });
+  if (ds) box.appendChild(ds);
   $('#modal-backdrop').hidden = false;
 
   const close = (approved) => {
@@ -641,6 +747,7 @@ $('#mode-tabs').addEventListener('click', (e) => {
   $('#objective').placeholder = MODE_COPY[S.mode].ph;
   $('#out-path-field').hidden = S.mode !== 'generate';
   $('#targets-field').hidden = S.mode === 'generate';
+  saveForm();
 });
 
 function renderChips(listEl, items, onRemove) {
@@ -661,6 +768,7 @@ function refreshTargets() {
     S.targets.splice(i, 1);
     refreshTargets();
   });
+  saveForm();
 }
 
 function refreshAcceptance() {
@@ -668,6 +776,7 @@ function refreshAcceptance() {
     S.acceptance.splice(i, 1);
     refreshAcceptance();
   });
+  saveForm();
 }
 
 $('#btn-add-targets').addEventListener('click', async () => {
@@ -700,10 +809,55 @@ $('#btn-restart').addEventListener('click', async () => {
   setBridgeStatus('', 'restarting…');
 });
 
+/* ============================ persistence & shortcuts ============================ */
+const PERSIST_IDS = ['objective', 'provider', 'language', 'framework', 'out-path',
+                     'risk', 'max-revisions', 'test-command'];
+
+function saveForm() {
+  const data = { mode: S.mode, acceptance: S.acceptance, targets: S.targets };
+  for (const id of PERSIST_IDS) data[id] = document.getElementById(id).value;
+  data['run-linters'] = $('#run-linters').checked;
+  data['run-tests'] = $('#run-tests').checked;
+  try { localStorage.setItem('smartcode-form', JSON.stringify(data)); } catch (_) {}
+}
+
+function restoreForm() {
+  let data;
+  try { data = JSON.parse(localStorage.getItem('smartcode-form') || 'null'); } catch (_) {}
+  if (!data) return;
+  for (const id of PERSIST_IDS) {
+    if (data[id] !== undefined) document.getElementById(id).value = data[id];
+  }
+  if (data['run-linters'] !== undefined) $('#run-linters').checked = data['run-linters'];
+  if (data['run-tests'] !== undefined) $('#run-tests').checked = data['run-tests'];
+  S.acceptance = data.acceptance || [];
+  S.targets = data.targets || [];
+  refreshAcceptance();
+  refreshTargets();
+  if (data.mode && data.mode !== S.mode) {
+    document.querySelector(`#mode-tabs button[data-mode="${data.mode}"]`)?.click();
+  }
+}
+
+document.addEventListener('input', saveForm);
+document.addEventListener('change', saveForm);
+
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !S.running) {
+    e.preventDefault();
+    startRun();
+  }
+  if (e.key === 'Escape' && !$('#modal-backdrop').hidden) {
+    // Escape = reject, never silently approve.
+    $('#btn-reject').click();
+  }
+});
+
 /* ============================ boot ============================ */
 buildFlow();
 $('#provider').addEventListener('change', updateProviderHint);
 if (bridge.demo) setBridgeStatus('ok', 'demo mode (no Electron)');
+restoreForm();
 // The bridge's "ready" line may have been forwarded before this window loaded,
 // so always send init once at boot; applyInit is idempotent.
 bridge.send({ id: 'init', cmd: 'init' });

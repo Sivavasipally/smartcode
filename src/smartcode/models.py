@@ -106,9 +106,6 @@ class CodeEdit(BaseModel):
     content: str = Field("", description="new content for create/replace/insert")
     summary: str = ""
 
-    def is_write(self) -> bool:
-        return self.action in ("create", "replace", "insert", "delete") and self.action != "create" or True
-
 
 class EditSet(BaseModel):
     """The coder's full structured answer — the unit the verifier consumes."""
@@ -221,6 +218,10 @@ class EvidencePackage(BaseModel):
     plan: Optional[Plan] = None
     edits: list[CodeEdit] = Field(default_factory=list)
     applied: list[AppliedEdit] = Field(default_factory=list)
+    diffs: dict[str, str] = Field(
+        default_factory=dict,
+        description="unified diff per file (old disk content vs proposed content)",
+    )
     verify: Optional[VerifyResult] = None
     critique: Optional[Critique] = None
     revisions: int = 0

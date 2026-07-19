@@ -107,6 +107,32 @@ def materialize(edits: list[CodeEdit], root: Path | str = ".") -> dict[str, str]
     return result
 
 
+def unified_diffs(files: dict[str, str]) -> dict[str, str]:
+    """Unified diff per file: current on-disk content vs the proposed content.
+
+    New files diff against empty. Powers the approval gate, CLI output, the
+    Electron diff view and the evidence package.
+    """
+    import difflib
+
+    out: dict[str, str] = {}
+    for path_str, new_text in files.items():
+        p = Path(path_str)
+        old_text = ""
+        if p.exists():
+            try:
+                old_text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        diff = "".join(difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{p.name}", tofile=f"b/{p.name}", n=3,
+        ))
+        out[path_str] = diff
+    return out
+
+
 def write_files(files: dict[str, str], allowed_roots: list[Path]) -> list[AppliedEdit]:
     """Write materialized files to disk, enforcing the writable-path policy."""
     applied: list[AppliedEdit] = []

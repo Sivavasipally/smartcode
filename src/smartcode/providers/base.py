@@ -121,6 +121,23 @@ def extract_json(text: str) -> Any:
     raise ValueError("no parseable JSON found in model output")
 
 
+def invoke_with_retry(llm: BaseChatModel, messages: Sequence[BaseMessage],
+                      attempts: int = 3, base_delay_s: float = 1.0):
+    """Invoke with exponential backoff on transient failures (rate limits,
+    connection drops). The last failure re-raises."""
+    import time
+
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return llm.invoke(list(messages))
+        except Exception as e:  # provider SDKs raise heterogeneous types
+            last = e
+            if i < attempts - 1:
+                time.sleep(base_delay_s * (2 ** i))
+    raise last  # type: ignore[misc]
+
+
 def _schema_instruction(schema: Type[BaseModel]) -> str:
     js = json.dumps(schema.model_json_schema(), indent=None)
     return (
@@ -162,7 +179,7 @@ def invoke_structured(
     convo: list[BaseMessage] = [*messages, HumanMessage(content=_schema_instruction(schema))]
     last_err: Exception | None = None
     for _ in range(max_retries + 1):
-        reply = llm.invoke(convo)
+        reply = invoke_with_retry(llm, convo)
         text = reply.content if isinstance(reply.content, str) else str(reply.content)
         try:
             data = extract_json(text)

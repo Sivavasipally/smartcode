@@ -16,13 +16,43 @@ patterns from the 2026 harness/context-engineering references (see the
 
 ## Install
 
-```bash
-uv sync                       # core (all providers except local torch)
-uv sync --extra local         # + torch (CPU) for the local Qwen SLM
+### One-shot setup (Python + UI together)
 
-# CUDA torch instead (recommended if you have an NVIDIA GPU):
-uv pip install torch --index-url https://download.pytorch.org/whl/cu121
+With **uv** (recommended):
+
+```bash
+uv sync && npm install --prefix ui
 ```
+
+With **pip** (uses the pinned [requirements.txt](requirements.txt)):
+
+```bash
+# Windows (PowerShell)
+python -m venv .venv; .venv\Scripts\activate
+pip install -r requirements.txt -e . ; npm install --prefix ui
+
+# macOS / Linux
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -e . && npm install --prefix ui
+```
+
+That's everything: CLI (`smartcode …`), library, tests (`pytest`), and the
+desktop app (`npm start --prefix ui`).
+
+### Local SLM extra (torch)
+
+Only needed for the `local` Qwen provider:
+
+```bash
+uv sync --extra local                 # uv, CPU wheel
+pip install torch                     # pip, CPU wheel
+# CUDA instead (recommended with an NVIDIA GPU):
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+`requirements.txt` is exported from the uv lockfile (pinned, reproducible) —
+regenerate it after dependency changes with
+`uv export --format requirements-txt --no-hashes --no-emit-project -o requirements.txt`.
 
 Copy `.env.example` to `.env` and fill in the keys for the providers you use.
 
@@ -40,6 +70,7 @@ The local provider only needs the model checkpoint (default
 ```bash
 smartcode doctor              # env, keys, grammars, local model, torch
 smartcode providers           # provider availability / active model
+smartcode runs                # recent runs from the evidence ledger
 
 smartcode gen "FastAPI endpoint POST /users with pydantic model" \
     --lang python --framework fastapi --out app/users.py -p groq
@@ -54,6 +85,12 @@ Common flags: `-p/--provider local|groq|anthropic|openai|google|mock`,
 `--yes` (auto-approve writes), `--verbose` (live per-node trace).
 
 Exit code is 0 for `success`/`best_effort`, 1 otherwise — scriptable in CI.
+Every run prints a **colored unified diff** of what changed (also shown in the
+approval prompt before anything is written), and every run is queryable later
+via `smartcode runs`.
+
+> Rebuilding from scratch? **[recreate.md](recreate.md)** is a complete
+> functional specification of the whole application.
 
 ## Examples
 
@@ -195,21 +232,190 @@ of the generation flow, live**:
   node's output: plan steps, verifier checks (AST / lint / tests), critique
   score + findings with severity and suggestions, applied files.
 - **HITL approval dialog** — risk-tiered writes pause the graph and show each
-  pending edit (action, path, anchor, summary) for Approve / Reject.
-- **Result view** — status banner, findings, written-file code, downloadable
+  pending edit (action, path, anchor, summary) **with a colored unified
+  diff** for Approve / Reject (Escape rejects, never approves).
+- **Result view** — status banner, findings, per-file **diff view**
+  (`+adds/−dels`), written-file code, "Show in folder", downloadable
   evidence-package JSON.
+- **History tab** — every past run from the evidence ledger; click one to
+  reopen its result and diffs.
+- Quality-of-life: Ctrl+Enter runs, the form persists across restarts.
+
+### Configure & run the desktop app
+
+**Prerequisites**
+
+1. **Node.js ≥ 18** (`node --version`) and npm.
+2. **uv on PATH** (`uv --version`) — the app launches the Python agent with
+   `uv run`, from the repo root.
+3. Python side installed once from the repo root: `uv sync`
+   (add `--extra local` if you'll use the local Qwen provider).
+4. Providers configured in `.env` at the **repo root** (same file the CLI
+   uses — copy `.env.example`, add e.g. `GROQ_API_KEY=...`). No UI-specific
+   configuration exists; the UI reads everything through the agent.
+
+**Install & start**
 
 ```bash
 cd ui
-npm install
-npm start          # spawns the Python agent (uv) as a stdio sidecar
-npm run smoke      # headless self-check: Electron + Python bridge handshake
+npm install        # one-time: installs Electron
+npm start          # opens the window and spawns the Python agent sidecar
 ```
 
-The UI talks to `python -m smartcode.uiserver` over **line-delimited JSON on
-stdio** — no ports, no extra Python dependencies. Opening
-`ui/renderer/index.html` in a plain browser runs a canned **demo mode** for UI
-development without Electron or Python.
+On launch the header should show a green dot with **"agent ready"**, and the
+Provider dropdown fills in with availability badges (● usable / ○ missing
+key). Pick provider, mode, and parameters on the left, then **Run pipeline**
+(or Ctrl+Enter). `medium`/`high` risk runs pause at the approval dialog with
+a diff before anything is written.
+
+**Verify / troubleshoot**
+
+```bash
+npm run smoke      # headless self-check: prints SMOKE_OK when Electron
+                   # can spawn the bridge and receive its "ready" handshake
+```
+
+| Symptom | Fix |
+|---|---|
+| Header says "agent exited" | `uv` not on PATH, or `uv sync` never ran — run `uv run python -m smartcode.uiserver` manually from the repo root and read the error; then "Restart agent" in the header |
+| Provider shows ○ unavailable | key missing from the repo-root `.env` (hint text shows the reason); restart the agent after editing `.env` |
+| Local provider unavailable | `uv sync --extra local` + check `SMARTCODE_LOCAL_MODEL_PATH` |
+| Runs never finish on `local` | CPU inference is minutes-per-node; install the CUDA torch wheel or use a cloud provider |
+
+**How it's wired**: the UI talks to `python -m smartcode.uiserver` over
+**line-delimited JSON on stdio** — no ports, no HTTP server, no extra Python
+dependencies; closing the window shuts the agent down. Opening
+`ui/renderer/index.html` in a plain browser runs a canned **demo mode** for
+UI development without Electron or Python.
+
+## Real sessions & recipes
+
+Everything below is genuine output from runs of this repo (trimmed for width).
+
+### 1. Cloud provider, clean pass (Groq · llama-3.3-70b-versatile)
+
+```
+$ smartcode gen "FastAPI endpoint POST /users with pydantic model" \
+      --lang python --framework fastapi --out app/users.py -p groq --yes --verbose
+
+   0.2s classify_intent  intent=new lang=python framework=fastapi
+   2.1s planner          5 step(s): Create a new FastAPI endpoint POST /users …
+   2.7s coder            1 edit(s)
+   2.8s verifier         PASS
+   3.2s critic           score=1.00 revise=False findings=0
+   3.2s hitl_gate        tier=medium -> approved
+   3.3s finalize         status=success written=1
+```
+
+Generated `app/users.py` — note the fastapi skill steering (`APIRouter`,
+`response_model`, `status_code=201`):
+
+```python
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+router = APIRouter()
+
+class User(BaseModel):
+    id: int
+    name: str
+    email: str
+
+@router.post('/users/', response_model=User, status_code=201)
+def create_user(user: User):
+    return user
+```
+
+### 2. Self-correction loop caught by the harness (weaker 8B model)
+
+The same request on `llama-3.1-8b-instant` shows why the deterministic sensor
+exists — ruff catches a real bug, the repair loop feeds it back, and when the
+model still can't fix it the run is **honestly** downgraded, never silently
+"done":
+
+```
+   …
+   verifier   FAIL lint failures: app\users.py: F821 Undefined name `app`
+   repair     revision 1: 1 issue(s) fed back
+   coder      1 edit(s)
+   …after 3 bounded revisions…
+   critic     score=0.00  findings=1
+     blocker: Undefined name `app` (app/users.py)
+         -> Import the FastAPI app instance or pass it as a dependency
+   finalize   status=best_effort written=1
+```
+
+Exit code 0 vs 1 plus the `status` field lets scripts distinguish these.
+
+### 3. Fully offline: local Qwen2.5-1.5B, no network, no keys
+
+```
+$ smartcode gen "a python function is_palindrome(s) that ignores case and
+  non-alphanumeric characters" --lang python --out demo/palindrome.py -p local --yes -v
+
+ 164.6s planner   5 step(s): Start with defining the function…
+ 363.2s coder     JSON contract failed; code-fence fallback used
+ 363.2s coder     1 edit(s)
+ 364.6s verifier  PASS
+ 442.9s critic    score=0.00 revise=False findings=0     ← 1.5B judge unavailable
+ 443.2s finalize  status=best_effort written=1
+```
+
+The 1.5B model can't emit code-inside-JSON, so the **code-fence path**
+produced the edit; the code itself passed AST + ruff and is correct
+(`re.sub(r'[^a-zA-Z0-9]','',s).lower()` + reversal check). `best_effort`
+(not `success`) because the tiny judge couldn't verify acceptance — the
+harness never claims more than it proved. Times are CPU; a GPU or any cloud
+provider is orders faster.
+
+### 4. The audit trail
+
+```
+$ smartcode runs
+| when                | status      | intent | rev | objective                        |
+| 2026-07-19T05-33-02 | success     | modify | 0   | replace old with solve           |
+| 2026-07-18T19-00-54 | success     | new    | 0   | FastAPI endpoint POST /users …   |
+| 2026-07-18T16-11-01 | best_effort | new    | 0   | a python function is_palindrome… |
+```
+
+Each row is backed by a full `evidence-*.json` (contract, plan, edits, diffs,
+verification, critique) — e.g. pull every failed check from a run:
+
+```bash
+python -c "import json;d=json.load(open('.smartcode/runs/evidence-2026-07-19T05-33-02.json'));\
+print([c['name'] for c in d['verify']['checks'] if not c['passed']])"
+```
+
+### 5. Recipe — CI quality gate (GitHub Actions)
+
+```yaml
+- name: smartcode review changed files
+  env:
+    GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+  run: |
+    uv sync
+    CHANGED=$(git diff --name-only origin/main -- '*.py' | tr '\n' ' ')
+    [ -z "$CHANGED" ] || uv run smartcode review $CHANGED \
+        --focus "bugs, security, missing error handling" -p groq
+```
+
+`review` never writes; findings land in the job log and the evidence ledger.
+
+### 6. Recipe — batch modernisation with the library
+
+```python
+from pathlib import Path
+from smartcode import CodeAgent
+
+agent = CodeAgent(provider="groq", default_risk_tier="low")   # low = auto-apply
+for f in Path("src").rglob("*.py"):
+    ev = agent.modify([str(f)], "add type hints to all public functions",
+                      acceptance=["behaviour unchanged", "mypy-clean annotations"])
+    print(f"{f}: {ev.status} ({ev.revisions} revisions)")
+```
+
+Every file still passes the full verify→critique pipeline individually, and
+each write is journaled with its diff.
 
 ## How it works — one LangGraph StateGraph
 
@@ -251,11 +457,11 @@ Full deep dive with inputs/outputs, failure routing and a worked trace:
 | 2 | `retriever` | no | tree-sitter parses targets into **symbols**; rerank-and-budget picks only relevant ones; builds a compact repo map; **sufficiency gate** halts if context is inadequate | just-in-time context — modifying a 2,000-line file doesn't cost 2,000 lines of tokens, and the coder never hallucinates over missing files |
 | 3 | `planner` | yes | ≤6 bounded, verifiable steps anchored to real symbols; unknowns go to `open_questions`, never guessed | Plan–Execute–Verify under an authority-layered prompt (policy > contract > skill > retrieved > scratchpad) |
 | 4 | `coder` | yes | emits **structured `CodeEdit`s** (create/replace/insert/delete, anchored to symbol or line range) — not prose; small models use a code-fence path instead of JSON | deterministic, reproducible, reviewable edits; capability-aware degradation down to a 1.5B SLM |
-| 5 | `verifier` | **no** | virtual-apply edits in memory, then: tree-sitter AST check, `py-compile`, linters (ruff/tsc/node/gofmt), your test command — all sandboxed | the **deterministic sensor**: ground truth a model can't sweet-talk; nothing touches disk yet |
-| 6 | `critic` | yes | LLM judge scores against **acceptance criteria**; findings with severity + suggestion; may not overrule the sensor; fails open (capped at `best_effort`) | inferential review — catches "compiles but wrong" |
+| 5 | `verifier` | **no** | virtual-apply edits in memory, compute **unified diffs vs disk**, then: tree-sitter AST check, `py-compile`, linters (ruff/tsc/node/gofmt), your test command — all sandboxed | the **deterministic sensor**: ground truth a model can't sweet-talk; nothing touches disk yet |
+| 6 | `critic` | yes | LLM judge reviews the **materialized files** (not raw edit JSON) against **acceptance criteria**; findings with severity + suggestion; may not overrule the sensor; fails open (capped at `best_effort`) | inferential review — catches "compiles but wrong" |
 | 7 | `repair` | no | folds verify+critique failures into feedback, records **failed approaches** in the scratchpad, compacts memory, loops back to coder (bounded by `max_revisions`) | self-correction that doesn't repeat mistakes and can't loop forever |
-| 8 | `hitl_gate` | no | risk-tiered approval: low auto, medium confirm (CLI prompt / UI dialog), high explicit-only | a human owns every risky write; the graph genuinely pauses |
-| 9 | `finalize` | no | writes approved files (writable-roots enforced one last time), assembles + persists the **EvidencePackage** | full auditability: any run reconstructable from `.smartcode/runs/` |
+| 8 | `hitl_gate` | no | risk-tiered approval with the **diff shown up front**: low auto, medium confirm (CLI prompt / UI dialog), high explicit-only | a human owns every risky write; the graph genuinely pauses |
+| 9 | `finalize` | no | writes approved files (writable-roots enforced one last time), assembles + persists the **EvidencePackage** incl. diffs | full auditability: any run reconstructable from `.smartcode/runs/` (`smartcode runs`, UI History tab) |
 
 Statuses are honest by construction: `success` requires the deterministic
 sensor **and** the LLM judge **and** the write gate to pass; anything less is

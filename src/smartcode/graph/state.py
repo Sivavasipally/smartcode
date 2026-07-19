@@ -28,6 +28,7 @@ class State(TypedDict, total=False):
     plan: dict             # Plan dump
     edits: list[dict]      # CodeEdit dumps (latest coder attempt)
     files: dict            # {path: new_full_text} — virtual apply result
+    diffs: dict            # {path: unified diff vs disk} — computed by verifier
     verify: dict           # VerifyResult dump
     critique: dict         # Critique dump
     revise_count: int

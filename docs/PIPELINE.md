@@ -203,6 +203,10 @@ Tasks performed, in order, **without touching disk**:
 1. **Virtual apply** — `editing.materialize()` resolves every anchor and
    composes the would-be file contents in memory. An unresolvable anchor is
    itself a verification failure.
+1b. **Unified diffs** — `editing.unified_diffs()` records exactly what would
+   change vs the current disk content. These diffs travel with the run: shown
+   in the CLI approval prompt and result, in the Electron approval modal and
+   Result/History views, and embedded in the final evidence package.
 2. **AST sensor** (`verify/ast_checks.py`) — tree-sitter parse with error-node
    detection per language; real `compile()` for Python; bracket-balance scan
    for unknown languages; empty-file rejection.
@@ -230,11 +234,14 @@ self-correction loop. An LLM judge can be sweet-talked; a parser cannot.
 
 | | |
 |---|---|
-| **Consumes** | edits (or, for review, the retrieved code), acceptance criteria, verify summary |
+| **Consumes** | the **materialized files** (or, for review, the retrieved code), acceptance criteria, verify summary |
 | **Produces** | `Critique`: findings (severity + location + suggestion), score 0–1, `satisfies_acceptance`, `revise` |
 | **LLM?** | yes — `Critique` schema |
 
-The critic judges what the sensor cannot: does the code actually satisfy the
+The critic reviews the *materialized result* — the whole files as they would
+land on disk, not the raw edit JSON — because edits alone hide integration
+errors (a perfect-looking patch that references a symbol the file no longer
+has). It judges what the sensor cannot: does the code actually satisfy the
 **acceptance criteria**? Is the approach idiomatic? Findings carry a severity
 (`blocker` / `major` / `minor` / `nit`) and, where possible, a concrete
 suggestion — which feeds the repair loop.
@@ -306,9 +313,11 @@ Policy:
 | `medium` | ask the human (CLI prompt / Electron dialog); `--yes` pre-approves |
 | `high` | requires an explicit approval callback — never auto-passes |
 
-Review runs skip the gate entirely (nothing to write). In the Electron UI this
-is the modal that pauses the graph mid-run — the Python thread genuinely
-blocks on your Approve/Reject.
+The approver always sees the **unified diff** of every pending change before
+deciding — in the CLI (colored inline) and in the Electron modal (collapsible
+per-file diff with add/delete counts). Review runs skip the gate entirely
+(nothing to write). In the Electron UI this is the modal that pauses the graph
+mid-run — the Python thread genuinely blocks on your Approve/Reject.
 
 **Achieves:** *Human Approval Context* / risk-tiered write gateway.
 
@@ -329,11 +338,13 @@ blocks on your Approve/Reject.
 1. If approved: write the materialized files — but **every path is checked
    against the writable roots** one final time; an edit that escaped scope is
    blocked here even if everything upstream approved it.
-2. Assemble the **EvidencePackage**: the contract, the plan, every edit, what
-   was actually applied (bytes, errors), the verification result, the
-   critique, the revision count, and the final status.
+2. Assemble the **EvidencePackage**: the contract, the plan, every edit, the
+   **unified diffs**, what was actually applied (bytes, errors), the
+   verification result, the critique, the revision count, and the final
+   status.
 3. Persist it to `.smartcode/runs/evidence-<timestamp>.json`, next to the
-   JSONL event ledger and the sqlite session checkpoint.
+   JSONL event ledger and the sqlite session checkpoint. Browse past runs
+   with `smartcode runs` or the Electron **History** tab.
 
 Status semantics (honest by construction):
 
