@@ -13,6 +13,7 @@ patterns from the 2026 harness/context-engineering references (see the
 [pattern map](#pattern-map-reference-docs--code)).
 
 ---
+![alt text](image.png)
 
 ## Install
 
