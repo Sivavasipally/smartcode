@@ -15,7 +15,10 @@ Companion docs: `docs/PIPELINE.md` (node-by-node deep dive), `README.md`
 **smartcode** is a local-first, multi-provider code-generation agent:
 
 - Three intents: **new** (generate code), **modify/update** (change existing
-  files), **review** (findings only, no writes).
+  files), **review** (findings only, no writes) — plus **workspace** runs:
+  point the agent at a folder that may hold multiple repos; it scans them,
+  proposes which files to change, pauses for review (approve / narrow /
+  suggest → re-propose), then runs the normal pipeline over the approved set.
 - Backends: local Qwen2.5-1.5B-Instruct SLM (transformers), Groq, Anthropic,
   OpenAI, Google Gemini, and a deterministic offline **mock**.
 - Three surfaces sharing one engine: Python library (`CodeAgent`), Rich CLI
@@ -71,7 +74,7 @@ src/smartcode/
   observability.py   RunLogger (JSONL + on_event callback)
   providers/         base.py registry.py mock.py local_qwen.py cloud.py
   context/           authority.py contract.py compaction.py
-  retrieval/         tree_sitter.py repo_map.py context_budget.py
+  retrieval/         tree_sitter.py repo_map.py context_budget.py workspace.py
   skills/            registry.py languages/*.md (10) frameworks/*.md (5)
   verify/            runner.py ast_checks.py linters.py tests.py
   graph/             state.py nodes.py supervisor.py builder.py checkpointer.py
@@ -145,6 +148,10 @@ warning note (inline comments leak into values).
 - `StructuredScratchpad {goal, observations, decisions, open_questions,
   failed_approaches}` + `to_prompt_block()` (markdown "## Scratchpad" block,
   empty string when nothing to show).
+- `TargetFile {path (workspace-relative), action: create|modify, reason}`;
+  `ChangeProposal {targets, rationale, open_questions}` — the selector's
+  output. `TaskContract.workspace_root: Optional[Path]` — when set (and dir
+  exists; validated), modify intent is valid with empty writable_paths.
 
 ## 6. Provider layer (`providers/`)
 
@@ -227,6 +234,17 @@ takes the inner definition's name. API: `parse_source`, `parse_file`
 `repo_map.py`: iterative walk skipping vcs/deps/build dirs, cap 200 files;
 focus files get full `name[start-end]` symbol listings (cap 25/file), others
 path-only. Output: markdown list headed `# Repo map: <root>`.
+
+`workspace.py` (folder-scale runs): `discover_repos` — top-level dirs with a
+marker (`.git pyproject.toml package.json go.mod Cargo.toml pom.xml
+build.gradle Gemfile composer.json .sln`) plus the root as a pseudo-repo "."
+(its scan skips claimed sub-repo dirs); `build_index` — caps 400 files/repo,
+1200 total, 512 KB/file, `truncated` flag; `rank_candidates` — path-word hits
+×2, then tree-sitter symbols parsed **only for the provisional top slice**
+(top_n×3) with symbol hits ×3, return top 40 (fallback top 15 when all
+scores 0); `render_workspace_map` — per-repo sections with language counts +
+markers, candidates listed with symbols/line-counts, others path-only (cap
+150/repo); `WorkspaceIndex.contains/has_file` for validation.
 
 `context_budget.py`: `score_evidence` — identifier-aware word overlap
 (split snake_case), symbol/path hits ×3, body hits ×1, `skill` source +1;
@@ -311,8 +329,29 @@ Key requirements beyond that doc:
   `.smartcode/runs/evidence-<ts>.json`; error state → status rejected with
   the error appended to task.notes as `error: …`.
 
+Workspace nodes:
+- `select_targets`: build_index → rank_candidates → render map → LLM
+  `ChangeProposal` (selector prompt carries a literal
+  `WORKSPACE_CANDIDATES: <top-15 rels>` line — the mock keys on it — and
+  reviewer feedback on revise rounds) → deterministic validation: drop
+  outside-workspace paths and modify-on-missing (recorded as an open
+  question), create-on-existing → modify, cap 10 targets; empty result or
+  empty workspace → error.
+- `proposal_gate`: `proposal_callback(task, proposal, round) -> {decision:
+  approve|revise|reject, feedback, selected}`; no callback → approve all.
+  approve → selected targets become `task.writable_paths` (absolute, under
+  root) and the narrowed proposal is stored; revise → feedback into state,
+  loop to select_targets (round > 4 → reject); reject → error/finalize.
+- retriever accommodations: planned `create` targets are skipped when
+  parsing and don't trip the sufficiency gate (all-create change-sets pass
+  with the workspace map as context); `state.workspace_map` replaces the
+  locally-built repo map when present.
+
 Routing (`supervisor.py`, pure functions): classify→ planner|retriever|
-finalize(error); retriever→ critic(review)|planner|finalize(error); planner→
+select_targets(workspace_root set ∧ no writable_paths)|finalize(error);
+select_targets→ proposal_gate|finalize; proposal_gate→
+retriever(approve)|select_targets(revise)|finalize(reject);
+retriever→ critic(review)|planner|finalize(error); planner→
 coder→verifier fixed; verifier→ critic(ok or budget exhausted)|repair;
 critic→ finalize(review)|repair(revise ∧ budget)|hitl_gate; repair→coder;
 hitl_gate→finalize→END.
@@ -333,6 +372,17 @@ overrides)`. Methods build TaskContracts:
 - `modify(paths, instruction, …)` — acceptance defaults include "existing
   behaviour preserved …".
 - `review(paths, focus?, session_id?)` — risk LOW, no writes.
+- `workspace(objective, root, language?, framework?, acceptance?, risk?,
+  session_id?)` — intent modify, `workspace_root=root`, empty
+  writable_paths; `CodeAgent` also accepts `proposal_callback`.
+- `generate(..., root=None)` targeting precedence: explicit `out_path` →
+  direct write target; else `root` → intent new + `workspace_root` (proposal
+  flow decides folder/file names + wiring edits); else legacy
+  `generated/solution<ext>`. CLI `gen` maps: `--out` given → direct;
+  omitted → `root = --root or "."`. Selector prompt carries an
+  `Intent:` line; for intent new it instructs conventional placement +
+  wiring-file modifications (mock: intent new → create `<top-candidate
+  folder>/mock_new.py`).
 `_run`: ensure dirs, RunLogger(run_id = session_id or uuid12), get_provider
 (raises ProviderError early), build graph per run, invoke, return
 `EvidencePackage` (defensive fallback if evidence missing). Module-level
@@ -351,7 +401,12 @@ finalize {status, applied[]}; repair message contains `revision N`.
 
 ## 14. CLI (`cli.py`, Typer + Rich)
 
-Commands: `gen`, `modify`, `review`, `providers`, `runs`, `doctor`.
+Commands: `gen`, `modify`, `review`, `ws`, `providers`, `runs`, `doctor`.
+- `ws OBJECTIVE --root DIR [common flags]`: interactive proposal review —
+  targets table (numbered, action colored, reason), rationale + open
+  questions, then prompt: `a`pprove all / comma-numbers for a subset /
+  `s`uggest (free-text feedback → revise) / `r`eject; `--yes` auto-approves
+  proposals as well as writes; non-dir root → exit 2.
 - Options as in README; `--yes` replaces the interactive approval with
   auto-approve; interactive approval shows an edits table **plus colored
   unified diffs** then `Confirm.ask`.
@@ -372,16 +427,19 @@ Line-delimited JSON over stdio; stdout carries ONLY protocol lines
 (diagnostics → stderr); one worker thread per run; graceful drain of active
 runs on stdin EOF / `shutdown`.
 
-Inbound: `{id, cmd:"init"}` · `{id, cmd:"run", params:{mode, objective,
-provider, language, framework, out_path, paths[], acceptance[], risk,
-test_command, max_revisions, run_linters, run_tests}}` ·
-`{id:<runId>, cmd:"approval_response", approved}` · `{id, cmd:"history"}` ·
-`{id, cmd:"load_run", file}` · `{cmd:"shutdown"}`.
+Inbound: `{id, cmd:"init"}` · `{id, cmd:"run", params:{mode (generate|modify|
+review|workspace), objective, provider, language, framework, out_path,
+workspace_root, paths[], acceptance[], risk, test_command, max_revisions,
+run_linters, run_tests}}` · `{id:<runId>, cmd:"approval_response", approved}` ·
+`{id:<runId>, cmd:"proposal_response", decision, feedback, selected[]}` ·
+`{id, cmd:"history"}` · `{id, cmd:"load_run", file}` · `{cmd:"shutdown"}`.
 
 Outbound: `{type:"ready"}` on start · `init` {providers: {id:{ok, reason,
 model}}, languages[], frameworks[], grammars[], defaults{provider, risk,
 max_revisions, cwd}} · `run_started` {runId, provider} · `event` {runId,
-event} · `approval_request` {runId, risk, edits[], diffs{path:udiff}}
+event} · `proposal_request` {runId, round, proposal (ChangeProposal dump)}
+(blocks up to 900 s; unanswered ⇒ reject) ·
+`approval_request` {runId, risk, edits[], diffs{path:udiff}}
 (blocks the run thread up to 900 s; unanswered ⇒ rejected) · `result`
 {runId, evidence (model_dump), written_files{path:content}} · `history`
 {runs: [{file, when, status, intent, objective, revisions}] newest-first,
@@ -411,6 +469,25 @@ Renderer (single-page, CSP `default-src 'self'`, no external resources):
 - **Layout**: header (brand, run clock, bridge status dot, Restart agent) /
   left params panel (clamp 250–340 px) / main = flow card (34%) over a
   bottom split: event ledger | tabs (Node detail · Result · History).
+- **Modes**: Generate / Modify / Review / Workspace tabs; workspace shows a
+  folder field with a native directory picker (`pick-folder` IPC →
+  `showOpenDialog openDirectory`) and requires it to run. Generate shows the
+  same folder field (relabeled "Codebase folder (for proposed placement)")
+  plus an **optional** output file; validation requires one of the two, and
+  an empty output file routes the run through the proposal flow (uiserver
+  passes `root` when `out_path` is empty).
+- **Flow canvas nodes** (9 in the top row, 118×62, x = 8+126·i): Classify,
+  Targets (`select_targets`), Retrieve, Plan, Code, Verify, Critique, Gate,
+  Finalize + Repair below (x 575, y 168). Non-workspace runs mark Targets
+  skipped. `proposal_gate` events drive the Targets node: approve → done +
+  Retrieve active; revise → stays active with a `×round` badge; reject →
+  fail. Loop-edge geometry uses node indexes 4/5/6 (code/verify/critique).
+- **Proposal modal** (`#proposal-backdrop`, z-index above the write modal):
+  round chip, rationale, per-target rows [checkbox | action badge | path |
+  reason], open questions, a suggestions textarea, and three actions —
+  Reject run / **Re-propose with suggestions** (revise + feedback, default
+  text when empty) / **Approve selected** (unticking all ⇒ reject). Escape
+  = reject. Reply: `proposal_response {decision, feedback, selected}`.
 - **Params panel**: mode tabs (objective label/placeholder switch per mode;
   generate shows out-path picker, modify/review show target-file chips),
   provider select `● id — model` with unavailable options disabled + reason
@@ -454,7 +531,7 @@ Renderer (single-page, CSP `default-src 'self'`, no external resources):
   repair), an approval request with a diff, a result with diffs, canned
   history/load_run — the entire UI is developable without Electron/Python.
 
-## 17. Tests (must all pass: `uv run pytest`, 24)
+## 17. Tests (must all pass: `uv run pytest`, 30)
 
 - `test_tree_sitter.py`: python symbols incl. nested method; typescript
   (export-wrapped function/interface found); go; `language_for_file`;
@@ -473,10 +550,20 @@ Renderer (single-page, CSP `default-src 'self'`, no external resources):
   modify → whole-file replaced; review → review_only, file untouched, no
   applied; modify missing file → rejected with `error:` in notes; evidence
   json persisted under runs/.
+- `test_workspace.py` (two-repo fixture: auth-service/pyproject +
+  src/login.py + src/billing.py, web-app/package.json + lib/cart.js):
+  discovery finds both repos with correct rels; ranking puts login.py first
+  for a "harden login password validation" objective with its symbols
+  parsed; e2e mock run with approve callback → proposal is
+  [("auth-service/src/login.py","modify")], round 1, status success, file
+  replaced; reject callback → status rejected, file untouched; revise-then-
+  approve → rounds [1,2], success; generate with `root=` (no out_path) →
+  proposal is a single create under `auth-service/src/`, file created there
+  after approval, status success.
 
 ## 18. Acceptance checklist
 
-1. `uv sync` clean; `uv run pytest` → 24 passed. Alternatively, a fresh venv
+1. `uv sync` clean; `uv run pytest` → 30 passed. Alternatively, a fresh venv
    with `pip install -r requirements.txt -e .` resolves without conflicts and
    passes the same suite.
 2. `smartcode doctor` — grammars ≥ 11, tree-sitter smoke ok.
@@ -486,7 +573,8 @@ Renderer (single-page, CSP `default-src 'self'`, no external resources):
 4. `smartcode modify <file> "…" -p mock --yes` → whole-file mock replace,
    diff shown; `smartcode runs` lists both.
 5. Bridge: init/run/approval(with diffs)/result(with diffs)/history/load_run
-   round-trip via a stdio driver.
+   round-trip via a stdio driver; workspace mode round-trip
+   (proposal_request → approve → approval_request → success, file changed).
 6. `cd ui && npm install && npm run smoke` → `SMOKE_OK bridge ready`.
 7. `npm start` → full run in the UI with live flow, approval modal with
    diff, result with diff + history.

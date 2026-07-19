@@ -70,6 +70,44 @@ def _approval(task: TaskContract, edits: list[dict], files: dict) -> bool:
                        default=True)
 
 
+def _proposal_review(task, proposal, round_no: int) -> dict:
+    """Interactive change-set review for workspace runs."""
+    console.print()
+    table = Table(title=f"Proposed change-set (round {round_no})")
+    table.add_column("#")
+    table.add_column("action")
+    table.add_column("file")
+    table.add_column("reason")
+    for i, t in enumerate(proposal.targets, 1):
+        style = "green" if t.action == "create" else "yellow"
+        table.add_row(str(i), f"[{style}]{t.action}[/{style}]", t.path, t.reason[:70])
+    console.print(table)
+    if proposal.rationale:
+        console.print(f"[dim]rationale: {proposal.rationale}[/dim]")
+    for q in proposal.open_questions:
+        console.print(f"[yellow]open question:[/yellow] {q}")
+
+    choice = typer.prompt(
+        "\n[a]pprove all / numbers to approve subset (e.g. 1,3) / "
+        "[s]uggest changes / [r]eject", default="a").strip().lower()
+    if choice in ("a", "approve", "y", "yes"):
+        return {"decision": "approve"}
+    if choice in ("r", "reject", "n", "no"):
+        return {"decision": "reject"}
+    if choice in ("s", "suggest"):
+        feedback = typer.prompt("guidance for the selector")
+        return {"decision": "revise", "feedback": feedback}
+    try:
+        picks = {int(x) for x in choice.replace(" ", "").split(",") if x}
+        selected = [t.path for i, t in enumerate(proposal.targets, 1) if i in picks]
+        if selected:
+            return {"decision": "approve", "selected": selected}
+    except ValueError:
+        pass
+    console.print("[red]unrecognised choice — treating as reject[/red]")
+    return {"decision": "reject"}
+
+
 def _make_agent(provider: Optional[str], yes: bool, verbose: bool,
                 test_cmd: Optional[str]) -> CodeAgent:
     overrides: dict = {}
@@ -77,7 +115,9 @@ def _make_agent(provider: Optional[str], yes: bool, verbose: bool,
         overrides["test_command"] = test_cmd
     settings = load_settings(provider=provider, verbose=verbose, **overrides)
     callback = (lambda *_: True) if yes else _approval
+    proposal_cb = (lambda *_: {"decision": "approve"}) if yes else _proposal_review
     return CodeAgent(settings=settings, approval_callback=callback,
+                     proposal_callback=proposal_cb,
                      on_event=_on_event if verbose else None)
 
 
@@ -143,7 +183,14 @@ def gen(
     objective: str = typer.Argument(..., help="what to build"),
     lang: Optional[str] = typer.Option(None, "--lang", "-l"),
     framework: Optional[str] = typer.Option(None, "--framework", "-f"),
-    out: Optional[str] = typer.Option(None, "--out", "-o", help="output file path"),
+    out: Optional[str] = typer.Option(
+        None, "--out", "-o",
+        help="output file path; omit to let the agent PROPOSE the location "
+             "from the code under --root (shown for approval first)"),
+    root: Optional[str] = typer.Option(
+        None, "--root", "-r",
+        help="codebase to place the new code in (used when --out is omitted; "
+             "defaults to the current directory)"),
     acceptance: List[str] = typer.Option([], "--accept", "-a",
                                          help="acceptance criterion (repeatable)"),
     provider: Optional[str] = _PROVIDER_OPT,
@@ -152,11 +199,13 @@ def gen(
     verbose: bool = _VERBOSE_OPT,
     test_cmd: Optional[str] = _TEST_OPT,
 ):
-    """Generate NEW code."""
+    """Generate NEW code. Without --out, the agent proposes folder + file
+    name(s) from the existing codebase and waits for your approval."""
     agent = _make_agent(provider, yes, verbose, test_cmd)
     console.print(f"[bold]smartcode gen[/bold] ({agent.settings.provider}): {objective}")
     ev = agent.generate(objective, language=lang, framework=framework,
-                        out_path=out, acceptance=acceptance or None, risk=risk)
+                        out_path=out, root=None if out else (root or "."),
+                        acceptance=acceptance or None, risk=risk)
     _show_result(ev)
     raise typer.Exit(0 if ev.status in ("success", "best_effort") else 1)
 
@@ -183,6 +232,34 @@ def modify(
     console.print(f"[bold]smartcode modify[/bold] ({agent.settings.provider}): {instruction}")
     ev = agent.modify(paths, instruction, language=lang, framework=framework,
                       acceptance=acceptance or None, risk=risk)
+    _show_result(ev)
+    raise typer.Exit(0 if ev.status in ("success", "best_effort") else 1)
+
+
+@app.command()
+def ws(
+    objective: str = typer.Argument(..., help="what to change across the workspace"),
+    root: str = typer.Option(".", "--root", "-r",
+                             help="workspace folder (may contain multiple repos)"),
+    lang: Optional[str] = typer.Option(None, "--lang", "-l"),
+    framework: Optional[str] = typer.Option(None, "--framework", "-f"),
+    acceptance: List[str] = typer.Option([], "--accept", "-a"),
+    provider: Optional[str] = _PROVIDER_OPT,
+    risk: Optional[str] = _RISK_OPT,
+    yes: bool = _YES_OPT,
+    verbose: bool = _VERBOSE_OPT,
+    test_cmd: Optional[str] = _TEST_OPT,
+):
+    """Folder-scale run: scan all repos under --root, review the proposed
+    change-set (approve / narrow / suggest), then generate + apply."""
+    if not Path(root).is_dir():
+        console.print(f"[red]not a directory:[/red] {root}")
+        raise typer.Exit(2)
+    agent = _make_agent(provider, yes, verbose, test_cmd)
+    console.print(f"[bold]smartcode ws[/bold] ({agent.settings.provider}): "
+                  f"{objective}  [dim]root={root}[/dim]")
+    ev = agent.workspace(objective, root=root, language=lang, framework=framework,
+                         acceptance=acceptance or None, risk=risk)
     _show_result(ev)
     raise typer.Exit(0 if ev.status in ("success", "best_effort") else 1)
 

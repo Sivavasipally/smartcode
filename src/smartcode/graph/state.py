@@ -18,6 +18,13 @@ class State(TypedDict, total=False):
     intent: str
     error: str            # fatal condition → route straight to finalize
 
+    # workspace plane (folder-scale runs)
+    workspace_map: str
+    proposal: dict         # ChangeProposal dump (validated)
+    proposal_feedback: str  # reviewer guidance for the next selection round
+    proposal_round: int
+    proposal_decision: str  # approve | revise | reject
+
     # context plane
     repo_map: str
     retrieved: list[dict]  # Evidence dumps (post budget/rerank)

@@ -6,22 +6,24 @@
 
 /* ============================ pipeline model ============================ */
 const NODES = [
-  { id: 'classify_intent', title: 'Classify', sub: 'intent · skills',  x: 10 },
-  { id: 'retriever',       title: 'Retrieve', sub: 'symbols · budget', x: 152 },
-  { id: 'planner',         title: 'Plan',     sub: 'bounded steps',    x: 294 },
-  { id: 'coder',           title: 'Code',     sub: 'structured edits', x: 436 },
-  { id: 'verifier',        title: 'Verify',   sub: 'AST · lint · tests', x: 578 },
-  { id: 'critic',          title: 'Critique', sub: 'LLM judge',        x: 720 },
-  { id: 'hitl_gate',       title: 'Gate',     sub: 'write approval',   x: 862 },
-  { id: 'finalize',        title: 'Finalize', sub: 'write · evidence', x: 1004 },
+  { id: 'classify_intent', title: 'Classify', sub: 'intent · skills',   x: 8 },
+  { id: 'select_targets',  title: 'Targets',  sub: 'scan · propose',    x: 134 },
+  { id: 'retriever',       title: 'Retrieve', sub: 'symbols · budget',  x: 260 },
+  { id: 'planner',         title: 'Plan',     sub: 'bounded steps',     x: 386 },
+  { id: 'coder',           title: 'Code',     sub: 'structured edits',  x: 512 },
+  { id: 'verifier',        title: 'Verify',   sub: 'AST · lint · tests', x: 638 },
+  { id: 'critic',          title: 'Critique', sub: 'LLM judge',         x: 764 },
+  { id: 'hitl_gate',       title: 'Gate',     sub: 'write approval',    x: 890 },
+  { id: 'finalize',        title: 'Finalize', sub: 'write · evidence',  x: 1016 },
 ];
-const REPAIR = { id: 'repair', title: 'Repair', sub: 'feedback loop', x: 507, y: 168 };
-const NODE_W = 126, NODE_H = 62, NODE_Y = 46;
+const REPAIR = { id: 'repair', title: 'Repair', sub: 'feedback loop', x: 575, y: 168 };
+const NODE_W = 118, NODE_H = 62, NODE_Y = 46;
 
 const NODE_COLORS = {
-  classify_intent: '#6ea8e8', retriever: '#5db0d0', planner: '#a58fe0',
-  coder: '#7bc47b', verifier: '#d9b04a', critic: '#e08a8a',
+  classify_intent: '#6ea8e8', select_targets: '#8fb8d8', retriever: '#5db0d0',
+  planner: '#a58fe0', coder: '#7bc47b', verifier: '#d9b04a', critic: '#e08a8a',
   repair: '#e0a35d', hitl_gate: '#d3c25b', finalize: '#69c9a1',
+  proposal_gate: '#8fb8d8',
 };
 
 const STATE_TEXT = { idle: '○ PENDING', active: '● RUNNING', done: '✓ DONE',
@@ -54,9 +56,9 @@ function buildFlow() {
     edges.push({ id: `e-${NODES[i].id}`, d: `M ${right(NODES[i])} ${midY} L ${NODES[i + 1].x} ${midY}` });
   }
   // loop-back edges through repair
-  const vx = NODES[4].x + NODE_W / 2, cx = NODES[5].x + NODE_W / 2;
+  const vx = NODES[5].x + NODE_W / 2, cx = NODES[6].x + NODE_W / 2;
   const rx = REPAIR.x + NODE_W / 2, ryTop = REPAIR.y, ryMid = REPAIR.y + NODE_H / 2;
-  const codeX = NODES[3].x + NODE_W / 2, bot = NODE_Y + NODE_H;
+  const codeX = NODES[4].x + NODE_W / 2, bot = NODE_Y + NODE_H;
   const loops = [
     { id: 'e-verify-repair', d: `M ${vx} ${bot} C ${vx} ${ryMid}, ${rx + 40} ${ryMid}, ${REPAIR.x + NODE_W} ${ryMid}`, cls: 'loop' },
     { id: 'e-critic-repair', d: `M ${cx} ${bot} C ${cx} ${REPAIR.y + 30}, ${rx + 90} ${ryTop + 10}, ${REPAIR.x + NODE_W} ${ryMid - 14}`, cls: 'loop' },
@@ -138,11 +140,35 @@ function advanceFlow(ev) {
     case 'classify_intent': {
       const m = /intent=(\w+)/.exec(ev.message || '');
       S.intent = m ? m[1] : 'new';
-      if (S.intent === 'new') {
+      if (S.expectProposal) {
+        activate('select_targets', 'e-classify_intent');
+      } else if (S.intent === 'new') {
+        setNodeState('select_targets', 'skip');
         setNodeState('retriever', 'skip');
         activate('planner', 'e-retriever');
       } else {
-        activate('retriever', 'e-classify_intent');
+        setNodeState('select_targets', 'skip');
+        activate('retriever', 'e-select_targets');
+      }
+      break;
+    }
+    case 'select_targets':
+      // proposal_gate decides what happens next; keep the node live while
+      // the review modal is open.
+      setNodeState('select_targets', 'active');
+      break;
+    case 'proposal_gate': {
+      const decision = ev.decision || '';
+      if (decision === 'approve' || /approved/.test(ev.message || '')) {
+        setNodeState('select_targets', 'done');
+        activate('retriever', 'e-select_targets');
+      } else if (decision === 'revise' || /revise/.test(ev.message || '')) {
+        const m = /round (\d+)/.exec(ev.message || '');
+        if (m) setBadge('select_targets', `×${m[1]}`);
+        setNodeState('select_targets', 'active');
+      } else {
+        setNodeState('select_targets', 'fail');
+        activate('finalize', 'e-hitl_gate');
       }
       break;
     }
@@ -455,11 +481,27 @@ function makeDemoBridge() {
     { node: 'hitl_gate', message: 'tier=medium -> approved', elapsed_s: 13.0 },
     { node: 'finalize', message: 'status=success written=1', status: 'success', applied: [{ path: 'src/api.py', applied: true, bytes_written: 1423, error: null, action: 'replace' }], elapsed_s: 13.2 },
   ];
+  const wsProposal = (round) => ({
+    type: 'proposal_request', round,
+    proposal: {
+      rationale: round === 1
+        ? 'login.py owns password validation; its tests must follow.'
+        : 'narrowed per your guidance: auth-service only.',
+      targets: [
+        { path: 'auth-service/src/login.py', action: 'modify', reason: 'validate_password lives here' },
+        { path: 'auth-service/tests/test_login.py', action: 'create', reason: 'no tests exist yet' },
+        ...(round === 1 ? [{ path: 'web-app/lib/cart.js', action: 'modify', reason: 'low confidence — shares session code' }] : []),
+      ],
+      open_questions: round === 1 ? ['should web-app changes ship separately?'] : [],
+    },
+  });
+
   return {
     demo: true,
     onMessage: (cb) => { onMsg = cb; },
     pickFiles: async () => ['src/api.py'],
     pickSave: async () => 'generated/solution.py',
+    pickFolder: async () => 'D:/projects/demo-workspace',
     restart: async () => {},
     send: async (obj) => {
       if (obj.cmd === 'init') {
@@ -477,6 +519,63 @@ function makeDemoBridge() {
           frameworks: ['express', 'fastapi', 'flask', 'react', 'spring'],
           defaults: { provider: 'groq', risk: 'medium', max_revisions: 3 },
         }), 250);
+      }
+      if (obj.cmd === 'run' && (obj.params.mode === 'workspace' ||
+          (obj.params.mode === 'generate' && !obj.params.out_path && obj.params.workspace_root))) {
+        const runId = obj.id;
+        onMsg({ type: 'run_started', runId, provider: obj.params.provider });
+        setTimeout(() => onMsg({ type: 'event', runId, event:
+          { node: 'classify_intent', message: 'intent=modify lang=python framework=-', elapsed_s: 0.2 } }), 400);
+        setTimeout(() => onMsg({ type: 'event', runId, event:
+          { node: 'select_targets', message: '3 target(s) across 2 top-level dir(s)', elapsed_s: 1.6,
+            targets: wsProposal(1).proposal.targets, round: 1 } }), 900);
+        setTimeout(() => onMsg({ ...wsProposal(1), runId }), 1300);
+        makeDemoBridge._proposal = (resp, round) => {
+          if (resp.decision === 'revise' && round === 1) {
+            setTimeout(() => onMsg({ type: 'event', runId, event:
+              { node: 'proposal_gate', message: `revise requested (round 1): ${resp.feedback}`, decision: 'revise', elapsed_s: 8 } }), 200);
+            setTimeout(() => onMsg({ type: 'event', runId, event:
+              { node: 'select_targets', message: '2 target(s) (round 2)', elapsed_s: 9.5, round: 2 } }), 900);
+            setTimeout(() => onMsg({ ...wsProposal(2), runId }), 1300);
+            makeDemoBridge._round = 2;
+            return;
+          }
+          if (resp.decision !== 'approve') {
+            setTimeout(() => onMsg({ type: 'event', runId, event:
+              { node: 'proposal_gate', message: 'rejected (round ' + round + ')', decision: 'reject', elapsed_s: 9 } }), 200);
+            setTimeout(() => onMsg({ type: 'result', runId,
+              evidence: { status: 'rejected', revisions: 0, diffs: {}, critique: null }, written_files: {} }), 900);
+            return;
+          }
+          setTimeout(() => onMsg({ type: 'event', runId, event:
+            { node: 'proposal_gate', message: `approved ${resp.selected.length} target(s) (round ${round})`, decision: 'approve', elapsed_s: 10 } }), 200);
+          let t2 = 400;
+          evs.slice(1).forEach((e) => {
+            t2 += 500;
+            setTimeout(() => onMsg({ type: 'event', runId, event: e }), t2);
+          });
+          const wsDiff = { [resp.selected[0]]: '--- a/login.py\n+++ b/login.py\n@@ -1,2 +1,4 @@\n def validate_password(pw):\n-    return len(pw) > 3\n+    if not pw or pw.isspace():\n+        return False\n+    return len(pw) >= 12\n' };
+          setTimeout(() => onMsg({ type: 'approval_request', runId, risk: 'medium',
+            edits: resp.selected.map((p) => ({ action: 'replace', path: p, summary: 'workspace change' })),
+            diffs: wsDiff }), t2 + 600);
+          makeDemoBridge._finish = (approved) => {
+            setTimeout(() => onMsg({ type: 'event', runId, event:
+              { node: 'hitl_gate', message: `tier=medium -> ${approved ? 'approved' : 'rejected'}`, elapsed_s: 18 } }), 300);
+            setTimeout(() => onMsg({ type: 'event', runId, event:
+              { node: 'finalize', message: `status=${approved ? 'success' : 'rejected'} written=${approved ? resp.selected.length : 0}`, elapsed_s: 18.4,
+                applied: approved ? resp.selected.map((p) => ({ path: p, applied: true, bytes_written: 512, error: null, action: 'replace' })) : [] } }), 700);
+            setTimeout(() => onMsg({ type: 'result', runId,
+              evidence: { status: approved ? 'success' : 'rejected', revisions: 1,
+                diffs: approved ? wsDiff : {}, critique: { findings: [] } },
+              written_files: {} }), 1100);
+          };
+        };
+        makeDemoBridge._round = 1;
+        return true;
+      }
+      if (obj.cmd === 'proposal_response') {
+        makeDemoBridge._proposal?.(obj, makeDemoBridge._round || 1);
+        return true;
       }
       if (obj.cmd === 'run') {
         const runId = obj.id;
@@ -535,6 +634,7 @@ function collectParams() {
     language: $('#language').value,
     framework: $('#framework').value,
     out_path: $('#out-path').value.trim(),
+    workspace_root: $('#ws-root').value.trim(),
     paths: S.targets,
     acceptance: S.acceptance,
     risk: $('#risk').value,
@@ -548,6 +648,9 @@ function collectParams() {
 function validate(p) {
   if (!p.objective && S.mode !== 'review') return 'Describe the objective first.';
   if ((S.mode === 'modify' || S.mode === 'review') && !p.paths.length) return 'Add at least one target file.';
+  if (S.mode === 'workspace' && !p.workspace_root) return 'Pick the workspace folder first.';
+  if (S.mode === 'generate' && !p.out_path && !p.workspace_root)
+    return 'Give an output file, or pick a codebase folder so the agent can propose one.';
   return null;
 }
 
@@ -559,6 +662,8 @@ function startRun() {
   errBox.hidden = true;
 
   S.running = true;
+  S.expectProposal = S.mode === 'workspace' ||
+    (S.mode === 'generate' && !p.out_path && !!p.workspace_root);
   S.runId = `run-${Date.now()}`;
   S.events = [];
   S.result = null;
@@ -610,6 +715,11 @@ bridge.onMessage((msg) => {
     case 'approval_request': {
       if (msg.runId !== S.runId) break;
       openApprovalModal(msg);
+      break;
+    }
+    case 'proposal_request': {
+      if (msg.runId !== S.runId) break;
+      openProposalModal(msg);
       break;
     }
     case 'result': {
@@ -730,23 +840,79 @@ function openApprovalModal(msg) {
   $('#btn-reject').onclick = () => close(false);
 }
 
+/* ============================ proposal modal ============================ */
+function openProposalModal(msg) {
+  const proposal = msg.proposal || {};
+  $('#proposal-round').textContent = `round ${msg.round || 1}`;
+  $('#proposal-rationale').textContent = proposal.rationale || '';
+  $('#proposal-feedback').value = '';
+
+  const box = $('#proposal-targets');
+  box.replaceChildren();
+  (proposal.targets || []).forEach((t) => {
+    const row = el('div', 'target-row');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = true; cb.dataset.path = t.path;
+    cb.addEventListener('change', () => row.classList.toggle('unchecked', !cb.checked));
+    row.appendChild(cb);
+    const act = el('span', `edit-action ${t.action === 'create' ? 'create' : 'replace'}`, t.action);
+    row.appendChild(act);
+    row.appendChild(el('span', 'target-path', t.path));
+    if (t.reason) row.appendChild(el('span', 't-reason', t.reason));
+    box.appendChild(row);
+  });
+
+  const qbox = $('#proposal-questions');
+  qbox.replaceChildren();
+  (proposal.open_questions || []).forEach((q) =>
+    qbox.appendChild(el('div', 'q', `open question: ${q}`)));
+
+  $('#proposal-backdrop').hidden = false;
+
+  const close = (payload) => {
+    $('#proposal-backdrop').hidden = true;
+    bridge.send({ id: msg.runId, cmd: 'proposal_response', ...payload });
+    $('#btn-proposal-approve').onclick = $('#btn-proposal-revise').onclick =
+      $('#btn-proposal-reject').onclick = null;
+  };
+  $('#btn-proposal-approve').onclick = () => {
+    const selected = [...box.querySelectorAll('input:checked')].map((c) => c.dataset.path);
+    if (!selected.length) return close({ decision: 'reject' });
+    close({ decision: 'approve', selected });
+  };
+  $('#btn-proposal-revise').onclick = () => {
+    const feedback = $('#proposal-feedback').value.trim();
+    close({ decision: 'revise', feedback: feedback || 'propose a different change-set' });
+  };
+  $('#btn-proposal-reject').onclick = () => close({ decision: 'reject' });
+}
+
 /* ============================ form wiring ============================ */
 const MODE_COPY = {
   generate: { label: 'What should be built?', ph: 'e.g. FastAPI endpoint POST /users with a pydantic model' },
   modify: { label: 'What should change?', ph: 'e.g. add rate limiting to all routes' },
   review: { label: 'Review focus (optional)', ph: 'e.g. security issues, error handling' },
+  workspace: { label: 'What should change across the workspace?', ph: 'e.g. add structured logging to every service entrypoint' },
 };
+
+function applyModeUI() {
+  document.querySelectorAll('#mode-tabs button').forEach((b) =>
+    b.classList.toggle('active', b.dataset.mode === S.mode));
+  $('#objective-label').textContent = MODE_COPY[S.mode].label;
+  $('#objective').placeholder = MODE_COPY[S.mode].ph;
+  $('#out-path-field').hidden = S.mode !== 'generate';
+  $('#targets-field').hidden = S.mode !== 'modify' && S.mode !== 'review';
+  $('#ws-root-field').hidden = S.mode !== 'workspace' && S.mode !== 'generate';
+  $('#ws-root-label').textContent = S.mode === 'generate'
+    ? 'Codebase folder (for proposed placement)'
+    : 'Workspace folder (may contain multiple repos)';
+}
 
 $('#mode-tabs').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   S.mode = btn.dataset.mode;
-  document.querySelectorAll('#mode-tabs button').forEach((b) =>
-    b.classList.toggle('active', b === btn));
-  $('#objective-label').textContent = MODE_COPY[S.mode].label;
-  $('#objective').placeholder = MODE_COPY[S.mode].ph;
-  $('#out-path-field').hidden = S.mode !== 'generate';
-  $('#targets-field').hidden = S.mode === 'generate';
+  applyModeUI();
   saveForm();
 });
 
@@ -787,7 +953,12 @@ $('#btn-add-targets').addEventListener('click', async () => {
 
 $('#btn-pick-out').addEventListener('click', async () => {
   const f = await bridge.pickSave($('#out-path').value);
-  if (f) $('#out-path').value = f;
+  if (f) { $('#out-path').value = f; saveForm(); }
+});
+
+$('#btn-pick-ws').addEventListener('click', async () => {
+  const d = await bridge.pickFolder();
+  if (d) { $('#ws-root').value = d; saveForm(); }
 });
 
 $('#acceptance-input').addEventListener('keydown', (e) => {
@@ -811,7 +982,7 @@ $('#btn-restart').addEventListener('click', async () => {
 
 /* ============================ persistence & shortcuts ============================ */
 const PERSIST_IDS = ['objective', 'provider', 'language', 'framework', 'out-path',
-                     'risk', 'max-revisions', 'test-command'];
+                     'ws-root', 'risk', 'max-revisions', 'test-command'];
 
 function saveForm() {
   const data = { mode: S.mode, acceptance: S.acceptance, targets: S.targets };
@@ -851,6 +1022,9 @@ document.addEventListener('keydown', (e) => {
     // Escape = reject, never silently approve.
     $('#btn-reject').click();
   }
+  if (e.key === 'Escape' && !$('#proposal-backdrop').hidden) {
+    $('#btn-proposal-reject').click();
+  }
 });
 
 /* ============================ boot ============================ */
@@ -858,6 +1032,7 @@ buildFlow();
 $('#provider').addEventListener('change', updateProviderHint);
 if (bridge.demo) setBridgeStatus('ok', 'demo mode (no Electron)');
 restoreForm();
+applyModeUI();
 // The bridge's "ready" line may have been forwarded before this window loaded,
 // so always send init once at boot; applyInit is idempotent.
 bridge.send({ id: 'init', cmd: 'init' });

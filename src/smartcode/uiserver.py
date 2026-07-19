@@ -48,7 +48,14 @@ class _Approval:
         self.approved = False
 
 
+class _ProposalGate:
+    def __init__(self) -> None:
+        self.ready = threading.Event()
+        self.result: dict = {"decision": "reject"}
+
+
 _approvals: dict[str, _Approval] = {}
+_proposal_gates: dict[str, _ProposalGate] = {}
 _APPROVAL_TIMEOUT_S = 900
 
 
@@ -97,6 +104,15 @@ def _handle_run(msg: dict) -> None:
         _approvals.pop(run_id, None)
         return gate.approved
 
+    def proposal_cb(task: TaskContract, proposal, round_no: int) -> dict:
+        gate = _ProposalGate()
+        _proposal_gates[run_id] = gate
+        send({"type": "proposal_request", "runId": run_id, "round": round_no,
+              "proposal": proposal.model_dump()})
+        gate.ready.wait(timeout=_APPROVAL_TIMEOUT_S)
+        _proposal_gates.pop(run_id, None)
+        return gate.result
+
     overrides = {
         k: params[k]
         for k in ("test_command", "max_revisions", "run_linters", "run_tests",
@@ -106,6 +122,7 @@ def _handle_run(msg: dict) -> None:
     try:
         agent = CodeAgent(provider=params.get("provider") or None,
                           approval_callback=approval_cb,
+                          proposal_callback=proposal_cb,
                           on_event=on_event, **overrides)
         send({"type": "run_started", "runId": run_id,
               "provider": agent.settings.provider})
@@ -116,11 +133,13 @@ def _handle_run(msg: dict) -> None:
         common = dict(acceptance=acceptance or None, session_id=run_id)
 
         if mode == "generate":
+            out_path = params.get("out_path") or None
             evidence = agent.generate(
                 objective,
                 language=params.get("language") or None,
                 framework=params.get("framework") or None,
-                out_path=params.get("out_path") or None,
+                out_path=out_path,
+                root=None if out_path else (params.get("workspace_root") or None),
                 risk=params.get("risk") or None, **common,
             )
         elif mode == "modify":
@@ -133,6 +152,13 @@ def _handle_run(msg: dict) -> None:
         elif mode == "review":
             evidence = agent.review(params.get("paths") or [],
                                     focus=objective or None, session_id=run_id)
+        elif mode == "workspace":
+            evidence = agent.workspace(
+                objective, root=params.get("workspace_root") or ".",
+                language=params.get("language") or None,
+                framework=params.get("framework") or None,
+                risk=params.get("risk") or None, **common,
+            )
         else:
             raise ValueError(f"unknown mode {mode!r}")
 
@@ -195,6 +221,17 @@ def _handle_approval_response(msg: dict) -> None:
         gate.ready.set()
 
 
+def _handle_proposal_response(msg: dict) -> None:
+    gate = _proposal_gates.get(str(msg.get("id")))
+    if gate:
+        gate.result = {
+            "decision": msg.get("decision", "reject"),
+            "feedback": msg.get("feedback", ""),
+            "selected": msg.get("selected"),
+        }
+        gate.ready.set()
+
+
 def main() -> None:
     send({"type": "ready"})
     workers: list[threading.Thread] = []
@@ -218,6 +255,8 @@ def main() -> None:
             workers.append(t)
         elif cmd == "approval_response":
             _handle_approval_response(msg)
+        elif cmd == "proposal_response":
+            _handle_proposal_response(msg)
         elif cmd == "history":
             threading.Thread(target=_handle_history, args=(msg,), daemon=True).start()
         elif cmd == "load_run":

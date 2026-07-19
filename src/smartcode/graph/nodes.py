@@ -20,6 +20,7 @@ from ..context.compaction import compact_scratchpad
 from ..context.contract import contract_for
 from ..editing import EditError, materialize, unified_diffs, write_files
 from ..models import (
+    ChangeProposal,
     Critique,
     EditSet,
     Evidence,
@@ -27,11 +28,18 @@ from ..models import (
     IntentOut,
     Plan,
     StructuredScratchpad,
+    TargetFile,
     TaskContract,
     VerifyResult,
 )
 from ..observability import RunLogger
-from ..prompts.roles import render_classifier, render_coder, render_critic, render_planner
+from ..prompts.roles import (
+    render_classifier,
+    render_coder,
+    render_critic,
+    render_planner,
+    render_selector,
+)
 from ..providers.base import BaseProvider, StructuredOutputError, invoke_structured
 from ..retrieval.context_budget import budget_evidence, render_evidence
 from ..retrieval.repo_map import build_repo_map
@@ -45,6 +53,13 @@ from .state import State
 #: (task, edits, files) -> approve?
 ApprovalCallback = Callable[[TaskContract, list[dict], dict], bool]
 
+#: (task, proposal, round) -> {"decision": "approve"|"revise"|"reject",
+#:                             "feedback": str, "selected": [rel paths]}
+ProposalCallback = Callable[[TaskContract, ChangeProposal, int], dict]
+
+_MAX_PROPOSAL_TARGETS = 10
+_MAX_PROPOSAL_ROUNDS = 4
+
 #: Keep whole files in context only below this size; larger files go symbol-by-symbol.
 _WHOLE_FILE_LINES = 120
 
@@ -56,11 +71,13 @@ class GraphNodes:
         provider: BaseProvider,
         logger: RunLogger,
         approval_callback: Optional[ApprovalCallback] = None,
+        proposal_callback: Optional[ProposalCallback] = None,
     ):
         self.settings = settings
         self.provider = provider
         self.logger = logger
         self.approval_callback = approval_callback
+        self.proposal_callback = proposal_callback
         self._llm = None
 
     @property
@@ -119,14 +136,153 @@ class GraphNodes:
         return {"intent": intent, "task": task.model_dump(mode="json"),
                 "skill": skill, "scratchpad": pad.model_dump(), "events": [ev]}
 
+    def select_targets(self, state: State) -> State:
+        """Workspace runs: scan every repo under the root, then have the LLM
+        propose the change-set — grounded in the deterministic index and
+        re-validated against it (a hallucinated path cannot survive)."""
+        from ..retrieval.workspace import build_index, rank_candidates, render_workspace_map
+
+        task = self._task(state)
+        root = Path(task.workspace_root)  # validated by the contract
+        index = build_index(root)
+        if not index.all_files:
+            ev = self.logger.emit("select_targets", f"no source files under {root}")
+            return {"error": f"workspace has no recognisable source files: {root} "
+                             f"(specify an explicit output path instead)",
+                    "events": [ev]}
+
+        candidates = rank_candidates(index, task.objective)
+        ws_map = render_workspace_map(index, candidates)
+
+        system = build_system_prompt(
+            task, skill=state.get("skill", ""), scratchpad=self._pad(state),
+            extra="## Workspace map\n" + ws_map,
+        )
+        try:
+            proposal = self._structured(
+                [SystemMessage(content=system),
+                 HumanMessage(content=render_selector(
+                     task.objective, [c.rel for c in candidates[:15]],
+                     _MAX_PROPOSAL_TARGETS,
+                     feedback=state.get("proposal_feedback", ""),
+                     intent=task.intent))],
+                ChangeProposal,
+            )
+        except StructuredOutputError as e:
+            ev = self.logger.emit("select_targets", f"failed: {e}")
+            return {"error": f"target selection failed: {e}", "events": [ev]}
+
+        # Deterministic validation against the index.
+        valid: list[TargetFile] = []
+        dropped: list[str] = []
+        for t in proposal.targets[:_MAX_PROPOSAL_TARGETS]:
+            rel = t.path.replace("\\", "/").lstrip("/")
+            if not index.contains(rel):
+                dropped.append(f"{t.path} (outside workspace)")
+                continue
+            exists = (root / rel).is_file()
+            if t.action == "modify" and not exists:
+                dropped.append(f"{t.path} (does not exist; selector said modify)")
+                continue
+            if t.action == "create" and exists:
+                t.action = "modify"
+            t.path = rel
+            valid.append(t)
+        if not valid:
+            detail = "; ".join(dropped) or "selector returned no targets"
+            ev = self.logger.emit("select_targets", f"no valid targets: {detail}")
+            return {"error": f"no valid change targets: {detail}", "events": [ev]}
+
+        proposal.targets = valid
+        if dropped:
+            proposal.open_questions.append(f"dropped invalid targets: {'; '.join(dropped)}")
+
+        ev = self.logger.emit(
+            "select_targets",
+            f"{len(valid)} target(s) across {len({t.path.split('/')[0] for t in valid})} top-level dir(s)",
+            targets=[{"path": t.path, "action": t.action, "reason": t.reason}
+                     for t in valid],
+            rationale=proposal.rationale,
+            round=state.get("proposal_round", 0) + 1,
+        )
+        return {"proposal": proposal.model_dump(), "workspace_map": ws_map,
+                "proposal_feedback": "", "events": [ev]}
+
+    def proposal_gate(self, state: State) -> State:
+        """First human gate of a workspace run: are these the right files?
+
+        approve → the (possibly narrowed) target set becomes the contract's
+        writable_paths; revise → reviewer feedback loops back into selection;
+        reject → run ends with nothing generated.
+        """
+        task = self._task(state)
+        proposal = ChangeProposal.model_validate(state.get("proposal") or {})
+        round_no = state.get("proposal_round", 0) + 1
+
+        if self.proposal_callback is None:
+            decision, feedback, selected = "approve", "", [t.path for t in proposal.targets]
+        else:
+            result = self.proposal_callback(task, proposal, round_no) or {}
+            decision = result.get("decision", "reject")
+            feedback = (result.get("feedback") or "").strip()
+            selected = result.get("selected") or [t.path for t in proposal.targets]
+
+        if decision == "revise" and round_no >= _MAX_PROPOSAL_ROUNDS:
+            decision, feedback = "reject", f"proposal rounds exhausted ({round_no})"
+
+        if decision == "approve":
+            chosen = [t for t in proposal.targets if t.path in set(selected)]
+            if not chosen:
+                decision = "reject"
+            else:
+                root = Path(task.workspace_root)
+                task.writable_paths = [root / t.path for t in chosen]
+                proposal.targets = chosen
+                ev = self.logger.emit(
+                    "proposal_gate",
+                    f"approved {len(chosen)} target(s) (round {round_no})",
+                    decision="approve", targets=[t.path for t in chosen],
+                )
+                return {"proposal_decision": "approve",
+                        "task": task.model_dump(mode="json"),
+                        "proposal": proposal.model_dump(),
+                        "proposal_round": round_no, "events": [ev]}
+
+        if decision == "revise":
+            ev = self.logger.emit("proposal_gate",
+                                  f"revise requested (round {round_no}): {feedback[:120]}",
+                                  decision="revise")
+            return {"proposal_decision": "revise", "proposal_feedback": feedback,
+                    "proposal_round": round_no, "events": [ev]}
+
+        ev = self.logger.emit("proposal_gate", f"rejected (round {round_no})",
+                              decision="reject")
+        return {"proposal_decision": "reject",
+                "error": "change proposal rejected by reviewer"
+                         + (f": {feedback}" if feedback else ""),
+                "proposal_round": round_no, "events": [ev]}
+
     def retriever(self, state: State) -> State:
         """Just-in-time context: parse targets → symbol evidence → rerank+budget."""
         task = self._task(state)
         targets = [Path(p) for p in task.writable_paths]
 
+        # Workspace runs may include planned new files — those have nothing to
+        # parse and must not trip the sufficiency gate.
+        create_rels = {t["path"] for t in (state.get("proposal") or {}).get("targets", [])
+                       if t.get("action") == "create"}
+        root = Path(task.workspace_root) if task.workspace_root else None
+
         evidence: list[Evidence] = []
         missing: list[str] = []
+        planned_new = 0
         for target in targets:
+            rel = (target.relative_to(root).as_posix()
+                   if root and target.is_absolute() and root in target.parents
+                   else str(target).replace("\\", "/"))
+            if rel in create_rels and not target.exists():
+                planned_new += 1
+                continue
             parsed = parse_file(target)
             if not parsed.ok:
                 missing.append(f"{target}: {parsed.error}")
@@ -146,21 +302,29 @@ class GraphNodes:
                                       self.settings.context_token_budget)
 
         # Sufficient-context gate: don't let a coder hallucinate over nothing.
+        # A workspace change-set of only new files legitimately has no repo
+        # evidence — the workspace map is its context.
+        all_planned_new = planned_new == len(targets) and planned_new > 0
         contract = contract_for("coder", task.intent)
-        if not contract.check(selected):
+        if not all_planned_new and not contract.check(selected):
             detail = "; ".join(contract.violations + missing)
             ev = self.logger.emit("retriever", f"insufficient context: {detail}")
             return {"error": f"insufficient context: {detail}", "events": [ev]}
 
-        # Root the repo map at the targets' common parent so absolute targets
-        # outside the cwd still get a useful neighbourhood map.
-        import os
-        existing = [t for t in targets if t.exists()]
-        if existing:
-            root = Path(os.path.commonpath([str(t.resolve().parent) for t in existing]))
+        if state.get("workspace_map"):
+            # Workspace runs already carry a budgeted multi-repo map.
+            repo_map = state["workspace_map"]
         else:
-            root = Path.cwd()
-        repo_map = build_repo_map(root if root.is_dir() else targets[0], focus=targets)
+            # Root the repo map at the targets' common parent so absolute
+            # targets outside the cwd still get a useful neighbourhood map.
+            import os
+            existing = [t for t in targets if t.exists()]
+            if existing:
+                map_root = Path(os.path.commonpath([str(t.resolve().parent) for t in existing]))
+            else:
+                map_root = Path.cwd()
+            repo_map = build_repo_map(map_root if map_root.is_dir() else targets[0],
+                                      focus=targets)
 
         ev = self.logger.emit(
             "retriever",

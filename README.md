@@ -72,11 +72,21 @@ smartcode doctor              # env, keys, grammars, local model, torch
 smartcode providers           # provider availability / active model
 smartcode runs                # recent runs from the evidence ledger
 
+# explicit output path — writes exactly there
 smartcode gen "FastAPI endpoint POST /users with pydantic model" \
     --lang python --framework fastapi --out app/users.py -p groq
 
+# no --out: the agent scans the codebase (--root, default .), PROPOSES the
+# folder + file name(s) — plus any wiring edits — and asks before generating
+smartcode gen "a rate-limiter middleware" --root . -p groq
+
 smartcode modify src/app.ts "add rate limiting to all routes" -p local
 smartcode review pkg/handler.go -p anthropic
+
+# folder-scale: scan every repo under --root, review the proposed change-set,
+# approve / narrow / send suggestions — then it codes
+smartcode ws "add structured logging to every service entrypoint" \
+    --root D:/projects -p groq
 ```
 
 Common flags: `-p/--provider local|groq|anthropic|openai|google|mock`,
@@ -220,7 +230,8 @@ verification results, critique, what was written) and is journaled to
 A desktop app that exposes **every parameter** and shows **every internal node
 of the generation flow, live**:
 
-- **Parameters panel** — Generate / Modify / Review tabs, objective, provider
+- **Parameters panel** — Generate / Modify / Review / **Workspace** tabs
+  (workspace: native folder picker over a multi-repo root), objective, provider
   picker with live availability + model badges, language/framework, output
   path or target files (native dialogs), acceptance-criteria chips, risk tier,
   max revisions, test command, linter/test toggles.
@@ -231,6 +242,10 @@ of the generation flow, live**:
 - **Event ledger** — every node event, timestamped; click one to inspect the
   node's output: plan steps, verifier checks (AST / lint / tests), critique
   score + findings with severity and suggestions, applied files.
+- **Change-set proposal dialog** *(workspace runs)* — before any generation,
+  review the proposed files with per-file checkboxes, the selector's reasons
+  and open questions; approve the selection, or type suggestions and
+  **Re-propose** — the run loops back with your guidance.
 - **HITL approval dialog** — risk-tiered writes pause the graph and show each
   pending edit (action, path, anchor, summary) **with a colored unified
   diff** for Approve / Reject (Escape rejects, never approves).
@@ -417,12 +432,54 @@ for f in Path("src").rglob("*.py"):
 Every file still passes the full verify→critique pipeline individually, and
 each write is journaled with its diff.
 
+## Workspace mode — point it at a folder of repos
+
+`smartcode ws` (CLI) and the **Workspace** tab (desktop app) operate on a whole
+folder that may contain **multiple repos**:
+
+1. **Scan** — every repo under the root is discovered (`.git`, `pyproject.toml`,
+   `package.json`, `go.mod`, … markers), source files indexed with tree-sitter
+   symbols, candidates ranked against your objective (capped + budgeted, so
+   thousand-file workspaces stay cheap).
+2. **Propose** — the selector LLM proposes the change-set: which files to
+   create/modify and *why*, grounded in the index — a path it invented cannot
+   survive validation.
+3. **Review** — the run pauses and shows you the proposed files **before any
+   code is generated**. You can approve, untick files to narrow the set,
+   or send suggestions ("auth-service only, skip web-app") — suggestions
+   re-run the selection with your guidance (bounded rounds).
+4. **Proceed** — the approved set becomes the contract's writable paths and the
+   normal pipeline runs: retrieve → plan → code → verify → critique →
+   **write gate with diffs** → finalize. Two gates, two questions: *right
+   files?* then *right changes?*
+
+The same proposal flow powers **generate without an output path**: the agent
+identifies the conventional folder + file name for the new code (and the
+existing files that need wiring edits — exports, routers, registries), shows
+them for approval, then generates. In the desktop app, leave "Output file"
+empty and pick the codebase folder.
+
+```python
+from smartcode import CodeAgent
+
+def review_targets(task, proposal, round_no):
+    print([f"{t.action} {t.path} — {t.reason}" for t in proposal.targets])
+    return {"decision": "approve"}                    # or "revise"/"reject"
+
+agent = CodeAgent(provider="groq", proposal_callback=review_targets)
+ev = agent.workspace("add health-check endpoints to all services",
+                     root="D:/projects")
+```
+
 ## How it works — one LangGraph StateGraph
 
 ```
 START → classify_intent ─┬─(new)────────────→ planner ─┐
                          ├─(modify)→ retriever→ planner┤
-                         └─(review)→ retriever ──→ critic ──→ finalize
+                         ├─(review)→ retriever ──→ critic ──→ finalize
+                         └─(workspace)→ select_targets → proposal_gate
+                                            ▲   revise ◀──┘   │approve
+                                            └────────────── retriever → planner
                                                        │
                                ┌────── coder ◀─────────┘
                                ▼
@@ -434,7 +491,7 @@ START → classify_intent ─┬─(new)────────────→ 
                   critic (LLM judge) ◀── repair (feedback → scratchpad)
                     │        │revise            ▲
                     │        └──────────────────┘
-                  hitl_gate (risk-tiered write approval)
+                  hitl_gate (risk-tiered write approval, diffs shown)
                     │
                   finalize (apply edits, evidence package) → END
 ```
@@ -454,6 +511,8 @@ Full deep dive with inputs/outputs, failure routing and a worked trace:
 | # | Node | LLM? | Task | What it achieves |
 |---|------|------|------|------------------|
 | 1 | `classify_intent` | rarely | resolve intent, infer language, load language+framework **skill files**, init scratchpad, validate the contract | supervisor routing + procedural memory: the model gets expert framework guidance for free |
+| 1a | `select_targets` *(workspace)* | yes | scan all repos under the root, rank candidate files, LLM proposes the change-set (create/modify + reason), validated against the index | folder-scale targeting that cannot hallucinate paths |
+| 1b | `proposal_gate` *(workspace)* | no | pause for review: approve / narrow the file set / send suggestions (bounded re-proposal rounds) | the human owns *which files change* before any code is generated |
 | 2 | `retriever` | no | tree-sitter parses targets into **symbols**; rerank-and-budget picks only relevant ones; builds a compact repo map; **sufficiency gate** halts if context is inadequate | just-in-time context — modifying a 2,000-line file doesn't cost 2,000 lines of tokens, and the coder never hallucinates over missing files |
 | 3 | `planner` | yes | ≤6 bounded, verifiable steps anchored to real symbols; unknowns go to `open_questions`, never guessed | Plan–Execute–Verify under an authority-layered prompt (policy > contract > skill > retrieved > scratchpad) |
 | 4 | `coder` | yes | emits **structured `CodeEdit`s** (create/replace/insert/delete, anchored to symbol or line range) — not prose; small models use a code-fence path instead of JSON | deterministic, reproducible, reviewable edits; capability-aware degradation down to a 1.5B SLM |

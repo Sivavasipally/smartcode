@@ -31,6 +31,45 @@ def render_classifier(objective: str, targets: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+_SELECTOR = _env.from_string("""\
+You are the TARGET SELECTOR for a multi-repo workspace. Choose the smallest
+set of files that fulfils the objective.
+
+Objective: {{ objective }}
+Intent: {{ intent }}
+
+Rules:
+- "modify" targets MUST be paths that appear in the workspace map — never
+  invent a path. "create" targets must sit inside an existing repo directory.
+- New files follow the conventions visible in the map: source next to similar
+  source (src/, lib/, app/…), tests under the repo's test directory, names
+  matching the repo's style. State the chosen folder in the reason.
+{% if intent == "new" %}
+- This is NEW code: propose the file(s) to create in their conventional
+  location, plus any existing files that must be modified to wire the new
+  code in (exports, routers, registries) — wiring counts as part of the change.
+{% endif %}
+- Prefer the candidate files listed with symbols; they were ranked as the
+  most relevant. Look beyond them only with a clear reason.
+- At most {{ max_targets }} targets. Give a one-line reason per file.
+- Anything you cannot decide from the map goes into open_questions.
+{% if feedback %}
+
+The reviewer rejected the previous proposal with this guidance — follow it:
+{{ feedback }}
+{% endif %}
+WORKSPACE_CANDIDATES: {{ candidates }}
+""")
+
+
+def render_selector(objective: str, candidates: list[str], max_targets: int,
+                    feedback: str = "", intent: str = "modify") -> str:
+    return _SELECTOR.render(objective=objective, max_targets=max_targets,
+                            candidates=", ".join(candidates),
+                            feedback=feedback.strip(), intent=intent)
+
+
+# ---------------------------------------------------------------------------
 _PLANNER = _env.from_string("""\
 You are the PLANNER. Produce a short, executable plan for the objective.
 

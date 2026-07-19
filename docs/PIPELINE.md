@@ -8,7 +8,10 @@ what it achieves, and where it routes next. File references are relative to
 ```
 START → classify_intent ─┬─(new)────────────→ planner ─┐
                          ├─(modify)→ retriever→ planner┤
-                         └─(review)→ retriever ──→ critic ──→ finalize
+                         ├─(review)→ retriever ──→ critic ──→ finalize
+                         └─(workspace)→ select_targets → proposal_gate
+                                            ▲   revise ◀──┘   │approve
+                                            └────────────── retriever
                                                        │
                                ┌────── coder ◀─────────┘
                                ▼
@@ -73,8 +76,77 @@ Tasks performed:
 **Achieves:** *Supervisor routing* + *Skills & Procedural Memory* — the model
 gets expert framework guidance without you writing it into every prompt.
 
-**Routes to:** `planner` (new) or `retriever` (modify/review); `finalize` on
-contract violation.
+**Routes to:** `planner` (new), `retriever` (modify/review),
+`select_targets` (workspace runs — a `workspace_root` with no explicit
+targets); `finalize` on contract violation.
+
+---
+
+## 1a. `select_targets` — folder-scale targeting (workspace runs)
+
+*Code: `graph/nodes.py::select_targets`, `retrieval/workspace.py`*
+
+| | |
+|---|---|
+| **Consumes** | contract (`workspace_root`, objective), reviewer feedback from prior rounds |
+| **Produces** | validated `ChangeProposal` (targets with create/modify + reason), budgeted workspace map |
+| **LLM?** | yes — `ChangeProposal` schema, grounded in a deterministic index |
+
+1. **Scan**: discover every repo under the root (vcs/manifest markers:
+   `.git`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, …);
+   loose source at the root becomes a pseudo-repo. Hard caps (400
+   files/repo, 1200 total, 512 KB/file) keep huge workspaces cheap.
+2. **Rank**: lexical, identifier-aware scoring of every file against the
+   objective; only the provisional top slice gets tree-sitter symbol parsing
+   (progressive disclosure — parsing 1200 files would be wasted work).
+3. **Map**: candidates render with full symbol detail, everything else
+   path-only — a budgeted multi-repo map the selector (and later the
+   planner) can actually afford.
+4. **Propose**: the LLM picks the smallest change-set — per file: path,
+   `create`/`modify`, one-line reason — plus rationale and open questions.
+5. **Validate deterministically**: `modify` on a non-existent path is
+   dropped; anything outside the workspace root is dropped; `create` on an
+   existing file becomes `modify`; drops are surfaced as open questions.
+   A hallucinated path cannot survive this node.
+
+**Achieves:** agentic file discovery with harness-validated grounding — the
+LLM chooses from the index, it does not define reality.
+
+This node serves **new code too**: `generate` without an explicit output path
+routes here (with `root` as the workspace), and the selector proposes the
+conventional folder + file name for the new module *plus* the existing files
+that need wiring edits (exports, routers, registries) — so "where should this
+live?" is answered from the codebase, not guessed by the user.
+
+**Routes to:** `proposal_gate`; `finalize` when nothing valid remains.
+
+---
+
+## 1b. `proposal_gate` — "are these the right files?"
+
+*Code: `graph/nodes.py::proposal_gate`*
+
+The first of the **two human gates** in a workspace run, and it fires *before
+any code is generated* — reviewing a file list costs seconds; reviewing wrong
+diffs costs a whole generation cycle.
+
+The reviewer (CLI prompt, Electron dialog, or a library
+`proposal_callback`) returns one of:
+
+| decision | effect |
+|---|---|
+| `approve` (+ optional subset) | the selected targets become the contract's `writable_paths`; pipeline proceeds to `retriever` |
+| `revise` + feedback | guidance is injected into the selector prompt and selection re-runs (bounded — 4 rounds, then treated as reject) |
+| `reject` | run ends `rejected`; nothing was generated or written |
+
+No callback configured → approve-all (headless library use; the write gate
+still stands). The later write gate then answers the second question — *are
+these the right changes?* — with full diffs.
+
+**Achieves:** *Human Approval Context* applied to targeting, not just writing.
+
+**Routes to:** `retriever` (approve), `select_targets` (revise), `finalize`
+(reject).
 
 ---
 

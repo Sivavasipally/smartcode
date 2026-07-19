@@ -34,6 +34,7 @@
         <button data-mode="generate" class="active">Generate</button>
         <button data-mode="modify">Modify</button>
         <button data-mode="review">Review</button>
+        <button data-mode="workspace">Workspace</button>
       </div>
 
       <label class="field">
@@ -62,17 +63,29 @@
       </div>
 
       <div id="out-path-field" class="field">
-        <span class="field-label">Output file</span>
+        <span class="field-label">Output file <span class="opt">(optional)</span></span>
         <div class="path-row">
-          <input id="out-path" type="text" placeholder="generated/solution.py" />
+          <input id="out-path" type="text" placeholder="leave empty to let the agent propose it" />
           <button id="btn-pick-out" class="ghost-btn">…</button>
         </div>
+        <span class="field-hint">Empty = the agent scans the folder below,
+          proposes where the new code belongs, and asks for your approval.</span>
       </div>
 
       <div id="targets-field" class="field" hidden>
         <span class="field-label">Target files</span>
         <div id="targets-list" class="chip-list"></div>
         <button id="btn-add-targets" class="ghost-btn wide">+ Add files</button>
+      </div>
+
+      <div id="ws-root-field" class="field" hidden>
+        <span class="field-label" id="ws-root-label">Workspace folder (may contain multiple repos)</span>
+        <div class="path-row">
+          <input id="ws-root" type="text" placeholder="D:\projects" />
+          <button id="btn-pick-ws" class="ghost-btn">…</button>
+        </div>
+        <span class="field-hint">The agent scans every repo under this folder,
+          proposes which files to change, and waits for your approval.</span>
       </div>
 
       <div class="field">
@@ -157,6 +170,29 @@
         </div>
       </section>
     </main>
+
+    <!-- ============ change-set proposal modal (workspace runs) ============ -->
+    <div id="proposal-backdrop" hidden>
+      <div id="proposal-modal" role="dialog" aria-modal="true">
+        <h2>Proposed change-set <span id="proposal-round" class="round-chip"></span></h2>
+        <p class="modal-sub">The agent scanned the workspace and proposes changing
+          these files. Nothing is generated until you approve — untick files to
+          narrow the set, or send guidance for a new proposal.</p>
+        <div id="proposal-rationale" class="d-msg"></div>
+        <div id="proposal-targets"></div>
+        <div id="proposal-questions"></div>
+        <label class="field">
+          <span class="field-label">Suggestions for the selector (used by "Re-propose")</span>
+          <textarea id="proposal-feedback" rows="2"
+            placeholder="e.g. also update the tests; don't touch billing"></textarea>
+        </label>
+        <div class="modal-actions">
+          <button id="btn-proposal-reject" class="ghost-btn danger">Reject run</button>
+          <button id="btn-proposal-revise" class="ghost-btn">Re-propose with suggestions</button>
+          <button id="btn-proposal-approve" class="run-btn slim">Approve selected</button>
+        </div>
+      </div>
+    </div>
 
     <!-- ============ HITL approval modal ============ -->
     <div id="modal-backdrop" hidden>

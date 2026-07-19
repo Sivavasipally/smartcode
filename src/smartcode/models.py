@@ -28,6 +28,26 @@ class RiskTier(str, Enum):
     HIGH = "high"      # require explicit approval; block if unscoped
 
 
+class TargetFile(BaseModel):
+    """One file in a proposed change-set (workspace runs)."""
+
+    path: str = Field(..., description="path relative to the workspace root")
+    action: Literal["create", "modify"]
+    reason: str = Field("", description="why this file is part of the change")
+
+
+class ChangeProposal(BaseModel):
+    """Target-selector output: the change-set proposed for user review.
+
+    Nothing is generated or written until a human (or configured policy)
+    approves this — the first of the two gates in a workspace run.
+    """
+
+    targets: list[TargetFile] = Field(default_factory=list)
+    rationale: str = ""
+    open_questions: list[str] = Field(default_factory=list)
+
+
 class TaskContract(BaseModel):
     """Versioned work contract (Harness pattern #01: Task Contract).
 
@@ -44,6 +64,11 @@ class TaskContract(BaseModel):
         default_factory=list,
         description="paths the agent is permitted to create/modify; empty + high-risk => refuse",
     )
+    workspace_root: Optional[Path] = Field(
+        None,
+        description="folder-scale runs: the selector proposes targets under this "
+                    "root and the approved set becomes writable_paths",
+    )
     acceptance: list[str] = Field(
         default_factory=list,
         description="machine- or human-checkable completion criteria",
@@ -59,10 +84,12 @@ class TaskContract(BaseModel):
             raise ValueError("TaskContract.objective must be non-empty.")
         if not self.acceptance:
             raise ValueError("At least one acceptance criterion is required.")
-        if self.risk_tier == RiskTier.HIGH and not self.writable_paths:
+        if self.risk_tier == RiskTier.HIGH and not (self.writable_paths or self.workspace_root):
             raise ValueError("High-risk tasks require an explicit writable scope or must be refused.")
-        if self.intent == "modify" and not self.writable_paths:
-            raise ValueError("modify intent requires at least one writable target path.")
+        if self.intent == "modify" and not (self.writable_paths or self.workspace_root):
+            raise ValueError("modify intent requires target path(s) or a workspace root.")
+        if self.workspace_root and not Path(self.workspace_root).is_dir():
+            raise ValueError(f"workspace root is not a directory: {self.workspace_root}")
 
 
 # ---------------------------------------------------------------------------

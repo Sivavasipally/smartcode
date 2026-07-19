@@ -20,6 +20,7 @@ from .base import BaseProvider
 
 _PATH_RE = re.compile(r"^TARGET_FILES:\s*(.+)$", re.MULTILINE)
 _LANG_RE = re.compile(r"^LANGUAGE:\s*(\w+)$", re.MULTILINE)
+_CAND_RE = re.compile(r"^WORKSPACE_CANDIDATES:\s*(.+)$", re.MULTILINE)
 
 _SNIPPETS = {
     "python": "def solve(x):\n    \"\"\"Deterministic mock implementation.\"\"\"\n    return x\n",
@@ -42,6 +43,20 @@ class MockChatModel(BaseChatModel):
 
         if has("IntentOut"):
             return json.dumps({"intent": "new"})
+        if has("ChangeProposal"):
+            m = _CAND_RE.search(text)
+            first = m.group(1).split(",")[0].strip() if m else "src/main.py"
+            if re.search(r"^Intent:\s*new", text, re.MULTILINE):
+                # place the new file next to the top candidate, repo-conventional
+                folder = first.rsplit("/", 1)[0] if "/" in first else "src"
+                return json.dumps({"targets": [{"path": f"{folder}/mock_new.py",
+                                                "action": "create",
+                                                "reason": f"new module beside {first} (mock)"}],
+                                   "rationale": "mock create proposal",
+                                   "open_questions": []})
+            return json.dumps({"targets": [{"path": first, "action": "modify",
+                                            "reason": "top-ranked candidate (mock)"}],
+                               "rationale": "mock proposal", "open_questions": []})
         if has("Plan"):
             return json.dumps({
                 "approach": "Direct single-step implementation (mock).",

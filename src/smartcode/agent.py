@@ -13,7 +13,7 @@ from typing import Optional, Sequence
 from .config import Settings, load_settings
 from .graph.builder import build_graph
 from .graph.checkpointer import open_checkpointer
-from .graph.nodes import ApprovalCallback, GraphNodes
+from .graph.nodes import ApprovalCallback, GraphNodes, ProposalCallback
 from .models import EvidencePackage, RiskTier, TaskContract
 from .observability import OnEvent, RunLogger
 from .providers.registry import get_provider
@@ -39,6 +39,7 @@ class CodeAgent:
         provider: Optional[str] = None,
         settings: Optional[Settings] = None,
         approval_callback: Optional[ApprovalCallback] = None,
+        proposal_callback: Optional[ProposalCallback] = None,
         on_event: Optional[OnEvent] = None,
         **overrides: object,
     ):
@@ -48,6 +49,7 @@ class CodeAgent:
             settings = settings.model_copy(update={"provider": provider})
         self.settings = settings
         self.approval_callback = approval_callback
+        self.proposal_callback = proposal_callback
         self.on_event = on_event
 
     # ------------------------------------------------------------------ api
@@ -58,25 +60,41 @@ class CodeAgent:
         language: Optional[str] = None,
         framework: Optional[str] = None,
         out_path: Optional[str] = None,
+        root: Optional[str | Path] = None,
         acceptance: Optional[Sequence[str]] = None,
         risk: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> EvidencePackage:
-        """Create new code for ``objective`` at ``out_path``."""
-        if not out_path:
+        """Create new code for ``objective``.
+
+        Three targeting modes, most explicit wins:
+        - ``out_path`` given → write exactly there (no proposal round-trip).
+        - ``root`` given → the agent scans the codebase under ``root``,
+          proposes where the new file(s) belong (conventional folder/name,
+          plus any wiring edits to existing files) and pauses at the
+          proposal gate for review before generating.
+        - neither → legacy fallback ``generated/solution<ext>``.
+        """
+        kwargs: dict = {}
+        if out_path:
+            kwargs["writable_paths"] = [Path(out_path)]
+        elif root:
+            kwargs["writable_paths"] = []
+            kwargs["workspace_root"] = Path(root)
+        else:
             ext = EXT_BY_LANG.get((language or "python").lower(), ".txt")
-            out_path = f"generated/solution{ext}"
+            kwargs["writable_paths"] = [Path(f"generated/solution{ext}")]
         task = TaskContract(
             objective=objective,
             intent="new",
             language=language,
             framework=framework,
-            writable_paths=[Path(out_path)],
             acceptance=list(acceptance) if acceptance else [
                 "code parses/compiles cleanly",
                 f"implements: {objective}",
             ],
             risk_tier=RiskTier(risk or self.settings.default_risk_tier),
+            **kwargs,
         )
         return self._run(task, session_id)
 
@@ -124,6 +142,40 @@ class CodeAgent:
         )
         return self._run(task, session_id)
 
+    def workspace(
+        self,
+        objective: str,
+        root: str | Path,
+        *,
+        language: Optional[str] = None,
+        framework: Optional[str] = None,
+        acceptance: Optional[Sequence[str]] = None,
+        risk: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> EvidencePackage:
+        """Folder-scale run over a directory that may hold multiple repos.
+
+        The agent scans every repo under ``root``, proposes which files to
+        change (create/modify + reason), pauses for review via
+        ``proposal_callback`` — approve / narrow the set / send suggestions
+        for a re-proposal — and only then plans, codes, verifies and (after
+        the usual diff-gated write approval) applies the change.
+        """
+        task = TaskContract(
+            objective=objective,
+            intent="modify",
+            language=language,
+            framework=framework,
+            workspace_root=Path(root),
+            writable_paths=[],
+            acceptance=list(acceptance) if acceptance else [
+                "only the approved target files are changed",
+                f"implements: {objective}",
+            ],
+            risk_tier=RiskTier(risk or self.settings.default_risk_tier),
+        )
+        return self._run(task, session_id)
+
     # ------------------------------------------------------------------ core
     def _run(self, task: TaskContract, session_id: Optional[str]) -> EvidencePackage:
         settings = self.settings
@@ -133,7 +185,8 @@ class CodeAgent:
         logger = RunLogger(settings.data_dir, run_id, on_event=self.on_event)
         provider = get_provider(settings.provider, settings)
         nodes = GraphNodes(settings, provider, logger,
-                           approval_callback=self.approval_callback)
+                           approval_callback=self.approval_callback,
+                           proposal_callback=self.proposal_callback)
         checkpointer = open_checkpointer(settings)
         graph = build_graph(nodes, settings, checkpointer=checkpointer)
 

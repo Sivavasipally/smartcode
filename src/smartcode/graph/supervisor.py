@@ -17,8 +17,24 @@ from .state import State
 def route_after_classify(state: State) -> str:
     if state.get("error"):
         return "finalize"
+    task = state.get("task") or {}
+    if task.get("workspace_root") and not task.get("writable_paths"):
+        return "select_targets"
     intent = state.get("intent", "new")
     return "planner" if intent == "new" else "retriever"
+
+
+def route_after_select(state: State) -> str:
+    return "finalize" if state.get("error") else "proposal_gate"
+
+
+def route_after_proposal(state: State) -> str:
+    decision = state.get("proposal_decision")
+    if decision == "approve":
+        return "retriever"
+    if decision == "revise":
+        return "select_targets"
+    return "finalize"
 
 
 def route_after_retrieve(state: State) -> str:

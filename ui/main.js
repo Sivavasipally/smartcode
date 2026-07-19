@@ -70,6 +70,14 @@ ipcMain.handle('reveal-path', (_e, p) => {
   return true;
 });
 
+ipcMain.handle('pick-folder', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Select workspace folder',
+    properties: ['openDirectory'],
+  });
+  return res.canceled ? null : res.filePaths[0];
+});
+
 ipcMain.handle('pick-files', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: 'Select target files',

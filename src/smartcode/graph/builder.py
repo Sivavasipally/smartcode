@@ -10,7 +10,9 @@ from .supervisor import (
     make_route_after_critic,
     make_route_after_verify,
     route_after_classify,
+    route_after_proposal,
     route_after_retrieve,
+    route_after_select,
 )
 
 
@@ -18,6 +20,8 @@ def build_graph(nodes: GraphNodes, settings: Settings, checkpointer=None):
     g = StateGraph(State)
 
     g.add_node("classify_intent", nodes.classify_intent)
+    g.add_node("select_targets", nodes.select_targets)
+    g.add_node("proposal_gate", nodes.proposal_gate)
     g.add_node("retriever", nodes.retriever)
     g.add_node("planner", nodes.planner)
     g.add_node("coder", nodes.coder)
@@ -29,7 +33,11 @@ def build_graph(nodes: GraphNodes, settings: Settings, checkpointer=None):
 
     g.add_edge(START, "classify_intent")
     g.add_conditional_edges("classify_intent", route_after_classify,
-                            ["planner", "retriever", "finalize"])
+                            ["planner", "retriever", "select_targets", "finalize"])
+    g.add_conditional_edges("select_targets", route_after_select,
+                            ["proposal_gate", "finalize"])
+    g.add_conditional_edges("proposal_gate", route_after_proposal,
+                            ["retriever", "select_targets", "finalize"])
     g.add_conditional_edges("retriever", route_after_retrieve,
                             ["planner", "critic", "finalize"])
     g.add_edge("planner", "coder")
