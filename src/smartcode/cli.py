@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import List, Optional
 
@@ -14,6 +15,7 @@ from rich.table import Table
 from .agent import CodeAgent
 from .config import load_settings
 from .models import EvidencePackage, TaskContract
+from .pipeline_view import PipelineView
 
 app = typer.Typer(
     name="smartcode",
@@ -108,17 +110,34 @@ def _proposal_review(task, proposal, round_no: int) -> dict:
     return {"decision": "reject"}
 
 
+def _paused(view: Optional[PipelineView], fn):
+    """Run an interactive prompt with the live graph paused (if any)."""
+    if view is None:
+        return fn()
+    with view.paused():
+        return fn()
+
+
 def _make_agent(provider: Optional[str], yes: bool, verbose: bool,
-                test_cmd: Optional[str]) -> CodeAgent:
+                test_cmd: Optional[str],
+                graph: bool = False) -> tuple[CodeAgent, Optional[PipelineView]]:
     overrides: dict = {}
     if test_cmd:
         overrides["test_command"] = test_cmd
     settings = load_settings(provider=provider, verbose=verbose, **overrides)
-    callback = (lambda *_: True) if yes else _approval
-    proposal_cb = (lambda *_: {"decision": "approve"}) if yes else _proposal_review
-    return CodeAgent(settings=settings, approval_callback=callback,
-                     proposal_callback=proposal_cb,
-                     on_event=_on_event if verbose else None)
+    view = PipelineView(console) if graph and console.is_terminal else None
+
+    if yes:
+        callback = lambda *_: True
+        proposal_cb = lambda *_: {"decision": "approve"}
+    else:
+        callback = lambda t, e, f: _paused(view, lambda: _approval(t, e, f))
+        proposal_cb = lambda t, p, r: _paused(view, lambda: _proposal_review(t, p, r))
+
+    on_event = view.handle if view is not None else (_on_event if verbose else None)
+    agent = CodeAgent(settings=settings, approval_callback=callback,
+                      proposal_callback=proposal_cb, on_event=on_event)
+    return agent, view
 
 
 def _show_result(ev: EvidencePackage) -> None:
@@ -174,6 +193,8 @@ _PROVIDER_OPT = typer.Option(None, "--provider", "-p",
                              help="local | groq | anthropic | openai | google | mock")
 _YES_OPT = typer.Option(False, "--yes", "-y", help="auto-approve writes (skip HITL prompt)")
 _VERBOSE_OPT = typer.Option(False, "--verbose", "-v", help="live per-node trace")
+_GRAPH_OPT = typer.Option(False, "--graph", "-g",
+                          help="live graphical pipeline view (like the UI flow)")
 _RISK_OPT = typer.Option(None, "--risk", help="low | medium | high write-gate tier")
 _TEST_OPT = typer.Option(None, "--test-cmd", help="test command to run during verification")
 
@@ -197,15 +218,17 @@ def gen(
     risk: Optional[str] = _RISK_OPT,
     yes: bool = _YES_OPT,
     verbose: bool = _VERBOSE_OPT,
+    graph: bool = _GRAPH_OPT,
     test_cmd: Optional[str] = _TEST_OPT,
 ):
     """Generate NEW code. Without --out, the agent proposes folder + file
     name(s) from the existing codebase and waits for your approval."""
-    agent = _make_agent(provider, yes, verbose, test_cmd)
+    agent, view = _make_agent(provider, yes, verbose, test_cmd, graph)
     console.print(f"[bold]smartcode gen[/bold] ({agent.settings.provider}): {objective}")
-    ev = agent.generate(objective, language=lang, framework=framework,
-                        out_path=out, root=None if out else (root or "."),
-                        acceptance=acceptance or None, risk=risk)
+    with (view or nullcontext()):
+        ev = agent.generate(objective, language=lang, framework=framework,
+                            out_path=out, root=None if out else (root or "."),
+                            acceptance=acceptance or None, risk=risk)
     _show_result(ev)
     raise typer.Exit(0 if ev.status in ("success", "best_effort") else 1)
 
@@ -221,6 +244,7 @@ def modify(
     risk: Optional[str] = _RISK_OPT,
     yes: bool = _YES_OPT,
     verbose: bool = _VERBOSE_OPT,
+    graph: bool = _GRAPH_OPT,
     test_cmd: Optional[str] = _TEST_OPT,
 ):
     """MODIFY/UPDATE existing code."""
@@ -228,10 +252,11 @@ def modify(
         if not Path(p).exists():
             console.print(f"[red]file not found:[/red] {p}")
             raise typer.Exit(2)
-    agent = _make_agent(provider, yes, verbose, test_cmd)
+    agent, view = _make_agent(provider, yes, verbose, test_cmd, graph)
     console.print(f"[bold]smartcode modify[/bold] ({agent.settings.provider}): {instruction}")
-    ev = agent.modify(paths, instruction, language=lang, framework=framework,
-                      acceptance=acceptance or None, risk=risk)
+    with (view or nullcontext()):
+        ev = agent.modify(paths, instruction, language=lang, framework=framework,
+                          acceptance=acceptance or None, risk=risk)
     _show_result(ev)
     raise typer.Exit(0 if ev.status in ("success", "best_effort") else 1)
 
@@ -248,6 +273,7 @@ def ws(
     risk: Optional[str] = _RISK_OPT,
     yes: bool = _YES_OPT,
     verbose: bool = _VERBOSE_OPT,
+    graph: bool = _GRAPH_OPT,
     test_cmd: Optional[str] = _TEST_OPT,
 ):
     """Folder-scale run: scan all repos under --root, review the proposed
@@ -255,11 +281,12 @@ def ws(
     if not Path(root).is_dir():
         console.print(f"[red]not a directory:[/red] {root}")
         raise typer.Exit(2)
-    agent = _make_agent(provider, yes, verbose, test_cmd)
+    agent, view = _make_agent(provider, yes, verbose, test_cmd, graph)
     console.print(f"[bold]smartcode ws[/bold] ({agent.settings.provider}): "
                   f"{objective}  [dim]root={root}[/dim]")
-    ev = agent.workspace(objective, root=root, language=lang, framework=framework,
-                         acceptance=acceptance or None, risk=risk)
+    with (view or nullcontext()):
+        ev = agent.workspace(objective, root=root, language=lang, framework=framework,
+                             acceptance=acceptance or None, risk=risk)
     _show_result(ev)
     raise typer.Exit(0 if ev.status in ("success", "best_effort") else 1)
 
@@ -271,16 +298,18 @@ def review(
                                         help="what to focus the review on"),
     provider: Optional[str] = _PROVIDER_OPT,
     verbose: bool = _VERBOSE_OPT,
+    graph: bool = _GRAPH_OPT,
 ):
     """REVIEW code — findings only, no writes."""
     for p in paths:
         if not Path(p).exists():
             console.print(f"[red]file not found:[/red] {p}")
             raise typer.Exit(2)
-    agent = _make_agent(provider, True, verbose, None)
+    agent, view = _make_agent(provider, True, verbose, None, graph)
     console.print(f"[bold]smartcode review[/bold] ({agent.settings.provider}): "
                   f"{', '.join(paths)}")
-    ev = agent.review(paths, focus=focus)
+    with (view or nullcontext()):
+        ev = agent.review(paths, focus=focus)
     _show_result(ev)
     raise typer.Exit(0)
 

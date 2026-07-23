@@ -1,8 +1,8 @@
 # smartcode
 
 A local-first, multi-provider **code-generation agent** built on LangGraph 1.x,
-with a CLI, a Python library, and an Electron desktop UI that visualizes the
-pipeline live.
+with a CLI (that can draw the pipeline live in the terminal with `--graph`), a
+Python library, and an Electron desktop UI that visualizes the pipeline live.
 
 It generates **new** code, **modifies/updates** existing code, and **reviews**
 code across many languages and frameworks — driven by a local Qwen2.5-1.5B SLM
@@ -93,7 +93,8 @@ smartcode ws "add structured logging to every service entrypoint" \
 Common flags: `-p/--provider local|groq|anthropic|openai|google|mock`,
 `--risk low|medium|high` (write-gate tier), `--accept "<criterion>"`
 (repeatable acceptance criteria), `--test-cmd "pytest -q"`,
-`--yes` (auto-approve writes), `--verbose` (live per-node trace).
+`--yes` (auto-approve writes), `-v/--verbose` (live per-node trace),
+`-g/--graph` (live graphical pipeline view — see below).
 
 Exit code is 0 for `success`/`best_effort`, 1 otherwise — scriptable in CI.
 Every run prints a **colored unified diff** of what changed (also shown in the
@@ -102,6 +103,57 @@ via `smartcode runs`.
 
 > Rebuilding from scratch? **[recreate.md](recreate.md)** is a complete
 > functional specification of the whole application.
+
+### Live pipeline in the terminal (`--graph`)
+
+Add `-g`/`--graph` to any run command (`gen`, `modify`, `ws`, `review`) to get
+the desktop UI's flow diagram **in the terminal** — the same nine-stage graph,
+updating live as the run advances: nodes light up `◆ RUNNING`, settle into
+`✔ DONE` / `✘ FAILED` / `· SKIPPED`, the Repair loop shows a `×N` revision
+badge, and a scrolling timeline mirrors the event ledger.
+
+```bash
+smartcode modify src/api.py "add input validation to create_user" -p groq --graph
+```
+
+```
+┌─ PIPELINE    8.9s   revisions ×1 ────────────────────────────────────────────────────────────────────┐
+│  ┌────────────────────┐   ┌────────────────────┐   ┌────────────────────┐                            │
+│  │ ● Classify         │   │ ● Targets          │   │ ● Retrieve         │                            │
+│  │ intent · skills    │ ─▶│ scan · propose     │ ─▶│ symbols · budget   │                            │
+│  │ ✔ DONE             │   │ · SKIPPED          │   │ ✔ DONE             │                            │
+│  └────────────────────┘   └────────────────────┘   └────────────────────┘                            │
+│  ┌────────────────────┐   ┌────────────────────┐   ┌────────────────────┐                            │
+│  │ ● Plan             │   │ ● Code             │   │ ● Verify           │                            │
+│  │ bounded steps      │ ─▶│ structured edits   │ ─▶│ AST · lint · tests │                            │
+│  │ ✔ DONE             │   │ ✔ DONE             │   │ ◆ RUNNING          │                            │
+│  └────────────────────┘   └────────────────────┘   └────────────────────┘                            │
+│  ┌────────────────────┐   ┌────────────────────┐   ┌────────────────────┐                            │
+│  │ ● Critique         │   │ ● Gate             │   │ ● Finalize         │                            │
+│  │ LLM judge          │ ─▶│ write approval     │ ─▶│ write · evidence   │                            │
+│  │ ○ PENDING          │   │ ○ PENDING          │   │ ○ PENDING          │                            │
+│  └────────────────────┘   └────────────────────┘   └────────────────────┘                            │
+│                                                                                                      │
+│  ┌────────────────────┐                                                                              │
+│  │ ● Repair  ×1       │                                                                              │
+│  │ feedback loop      │  ↺ Verify / Critique failure  →  feed back  →  Code                          │
+│  │ ↻ LOOP             │                                                                              │
+│  └────────────────────┘                                                                              │
+│                                                                                                      │
+│  ○ PENDING   ◆ RUNNING   ✔ DONE   ✘ FAILED   · SKIPPED   ↻ LOOP                                      │
+│  ──────────────────────────────────────────────────────────────────────────────────────────────    │
+│  5.1s coder           2 edit(s)                                                                      │
+│  6.0s verifier        FAIL: lint failures: F821 undefined name UserIn                                │
+│  6.1s repair          revision 1: 1 issue(s) fed back                                                │
+│  8.9s coder           2 edit(s)                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+The layout re-flows to the terminal width, and `medium`/`high`-risk approval
+prompts pause the live view cleanly, then resume. It's TTY-only: piping or
+redirecting output (`| tee`, CI logs) automatically falls back to the plain
+`--verbose` line trace, and legacy Windows consoles get ASCII glyphs
+(`*`/`+`/`x`/`->`) instead of the box-drawing ones.
 
 ## Examples
 
@@ -139,6 +191,10 @@ smartcode gen "endpoint POST /users with a pydantic model and email validation" 
 # modify existing code — tree-sitter loads only the relevant symbols
 smartcode modify src/middleware.ts "add rate limiting to all routes" \
     --framework express -p groq
+
+# same run, but watch the pipeline as a live diagram in the terminal
+smartcode modify src/middleware.ts "add rate limiting to all routes" \
+    --framework express -p groq --graph
 
 # react component with the local SLM (no API key, no network)
 smartcode gen "a Toggle component with label and onChange" \
@@ -202,6 +258,94 @@ ev = agent.generate(
 )
 print(ev.status, ev.revisions)                 # e.g. success 1
 print(ev.model_dump_json(indent=2))            # the full evidence package
+```
+
+### More CLI recipes
+
+**Diagnostics & housekeeping**
+
+```bash
+smartcode doctor                       # deps, tree-sitter grammars, providers, local model, torch
+smartcode providers                    # which providers are usable + the active model
+smartcode runs                         # recent runs from the evidence ledger
+smartcode runs --limit 25              # show more history (default 10)
+smartcode --help                       # top-level commands; add --help to any subcommand
+smartcode gen --help                   # every flag for one command
+```
+
+**Picking a provider / model**
+
+```bash
+# force a specific provider per run
+smartcode gen "a UUIDv7 helper" --out utils/uuid7.py -p anthropic --yes
+
+# override the model without touching .env (any provider)
+SMARTCODE_GROQ_MODEL=llama-3.1-8b-instant \
+    smartcode gen "a memoize decorator" --out utils/memoize.py -p groq --yes
+
+# fully offline, deterministic — great for CI smoke tests and demos
+smartcode gen "an is_even function" --lang python --out tmp/even.py -p mock --yes --graph
+```
+
+**Generate: explicit path vs. let the agent propose placement**
+
+```bash
+# explicit output path — writes exactly there
+smartcode gen "a sliding-window rate limiter" --lang python \
+    --out lib/ratelimit.py -p groq
+
+# no --out: agent scans --root, proposes folder + filename (+ wiring edits),
+# and asks before generating — approve, untick files, or suggest changes
+smartcode gen "a health-check endpoint" --framework fastapi --root . -p groq
+
+# acceptance criteria are repeatable and become the critic's checklist
+smartcode gen "parse_duration('1h30m') -> seconds" --lang python \
+    --out utils/duration.py \
+    --accept "handles combined units like 1h30m" \
+    --accept "raises ValueError on garbage input" \
+    -p groq --graph
+```
+
+**Modify & review**
+
+```bash
+# modify multiple files in one contract
+smartcode modify src/auth.py src/session.py "rotate refresh tokens on reuse" \
+    --risk high --test-cmd "pytest tests/auth -q" -p anthropic --graph
+
+# gate the change on YOUR test suite (verification fails if tests fail)
+smartcode modify src/api.py "add pagination to list_items" \
+    --test-cmd "pytest tests/test_api.py -q" -p groq
+
+# review only — findings, no writes; focus steers the reviewer
+smartcode review src/upload.py --focus "path traversal, missing size limits" -p groq
+
+# review several files at once
+smartcode review src/*.py --focus "error handling and logging gaps" -p groq
+```
+
+**Workspace (folder of repos)**
+
+```bash
+# scan every repo under --root, review the proposed change-set, then code
+smartcode ws "add structured logging to every service entrypoint" \
+    --root D:/projects -p groq --graph
+
+# headless workspace run: --yes approves both the proposal and the writes
+smartcode ws "bump the API version header to v2 across all services" \
+    --root D:/projects -p groq --yes
+```
+
+**Scripting / CI**
+
+```bash
+# exit code: 0 for success|best_effort, 1 otherwise — branch on it
+smartcode gen "a slugify helper" --out utils/slug.py -p mock --yes \
+    && echo "generated OK" || echo "run failed"
+
+# review changed Python files in a pre-commit / CI step (never writes)
+smartcode review $(git diff --name-only origin/main -- '*.py') \
+    --focus "bugs, security, missing error handling" -p groq
 ```
 
 ## Library
@@ -322,6 +466,9 @@ $ smartcode gen "FastAPI endpoint POST /users with pydantic model" \
    3.2s hitl_gate        tier=medium -> approved
    3.3s finalize         status=success written=1
 ```
+
+Swap `--verbose` for `--graph` to watch the same run as a live node diagram
+(see [Live pipeline in the terminal](#live-pipeline-in-the-terminal---graph)).
 
 Generated `app/users.py` — note the fastapi skill steering (`APIRouter`,
 `response_model`, `status_code=201`):
@@ -585,7 +732,8 @@ reliably escape whole files inside JSON strings.
 ```
 src/smartcode/
   agent.py          CodeAgent facade (generate / modify / review)
-  cli.py            Rich CLI: gen | modify | review | providers | doctor
+  cli.py            Rich CLI: gen | modify | ws | review | providers | doctor | runs
+  pipeline_view.py  live in-terminal pipeline diagram (the CLI --graph view)
   uiserver.py       stdio JSON bridge for the Electron UI
   config.py         pydantic-settings (SMARTCODE_* env), .env loading
   models.py         typed contracts: TaskContract, Plan, CodeEdit, VerifyResult, …
@@ -598,7 +746,7 @@ src/smartcode/
   graph/            state, nodes, supervisor routing, builder, checkpointer
 ui/                 Electron app (main.js, preload.js, renderer/)
 examples/           runnable demos (offline, mock provider)
-tests/              23 tests: symbols, sensor, edits, mock end-to-end
+tests/              30 tests: symbols, sensor, edits, mock end-to-end
 ```
 
 ## Tests
